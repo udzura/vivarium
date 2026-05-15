@@ -1,4 +1,41 @@
 module Vivarium
   VERSION: String
-  # See the writing guide of rbs: https://github.com/ruby/rbs#guides
+
+  class Error < ::StandardError
+  end
+
+  class Event < ::Struct
+    attr_accessor pid: Integer?
+    attr_accessor event_name: String?
+    attr_accessor payload: String?
+
+    def empty?: bool
+    def self.from_binary: (String raw) -> Event
+  end
+
+  class MapStore
+    def initialize: (?pin_dir: String pin_dir) -> void
+    def register_pid: (Integer pid) -> untyped
+    def unregister_pid: (Integer pid) -> untyped
+    def drain_events: () -> Array[Event]
+  end
+
+  class Daemon
+    BPF_PROGRAM: String
+    def initialize: (?pin_dir: String pin_dir) -> void
+    def run: () -> void
+  end
+
+  PIN_DIR: String
+  CONFIG_TARGETS_PIN: String
+  EVENT_INVOKED_PIN: String
+  EVENT_WRITE_POS_PIN: String
+
+  EVENT_NAME_SIZE: Integer
+  EVENT_PAYLOAD_SIZE: Integer
+  EVENT_STRUCT_SIZE: Integer
+  EVENT_CAPACITY: Integer
+
+  def self.observe: (?pin_dir: String pin_dir, ?out: untyped out) { () -> untyped } -> untyped
+  def self.run_daemon!: (?Array[String] argv) -> void
 end
