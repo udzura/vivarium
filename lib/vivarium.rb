@@ -15,7 +15,7 @@ module Vivarium
   EVENT_INVOKED_PIN = File.join(PIN_DIR, "event_invoked")
   EVENT_WRITE_POS_PIN = File.join(PIN_DIR, "event_write_pos")
 
-  EVENT_NAME_SIZE = 8
+  EVENT_NAME_SIZE = 16
   EVENT_PAYLOAD_SIZE = 64
   EVENT_STRUCT_SIZE = 4 + EVENT_NAME_SIZE + EVENT_PAYLOAD_SIZE
   EVENT_CAPACITY = 64
@@ -50,7 +50,7 @@ module Vivarium
       @event_invoked = RbBCC::ArrayTable.from_pin(
         File.join(@pin_dir, "event_invoked"),
         "unsigned int",
-        "char[76]",
+        "char[#{EVENT_STRUCT_SIZE}]",
         keysize: 4,
         leafsize: EVENT_STRUCT_SIZE
       )
@@ -114,7 +114,7 @@ module Vivarium
 
       struct event_t {
         u32 pid;
-        char event_name[8];
+        char event_name[16];
         char payload[64];
       };
 
@@ -149,11 +149,11 @@ module Vivarium
         struct event_t ev = {};
         int path_ret;
         ev.pid = pid;
-        __builtin_memcpy(ev.event_name, "path_open", 8);
+        __builtin_memcpy(ev.event_name, "path_open", 9);
 
         path_ret = bpf_d_path(&file->f_path, ev.payload, sizeof(ev.payload));
         if (path_ret < 0) {
-          __builtin_memcpy(ev.payload, "<path_error>", 12);
+          __builtin_memcpy(ev.payload, "<path_error>", 13);
         }
 
         event_invoked.update(&idx, &ev);
@@ -254,11 +254,21 @@ module Vivarium
         end
       end
 
-      bits_offset = f_path_bits_offset || anon_union_bits_offset
+      if f_path_bits_offset && anon_union_bits_offset && f_path_bits_offset != anon_union_bits_offset
+        warn "[vivariumd] BTF offset mismatch: f_path=#{f_path_bits_offset / 8}, (anon)=#{anon_union_bits_offset / 8}; preferring (anon)"
+      end
+
+      bits_offset = anon_union_bits_offset || f_path_bits_offset
       if bits_offset
         if (bits_offset % 8).positive?
           raise Error, "unsupported f_path bits offset=#{bits_offset}"
         end
+
+        if bits_offset >= 1024
+          warn "[vivariumd] suspicious f_path offset=#{bits_offset / 8}, fallback to offset=64"
+          return 64
+        end
+
         return bits_offset / 8
       end
 
