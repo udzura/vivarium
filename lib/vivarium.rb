@@ -107,7 +107,10 @@ module Vivarium
         void *mnt;
         void *dentry;
       };
-      struct file;
+      struct file {
+        char __off[__VIVARIUM_F_PATH_OFFSET__];
+        struct path f_path;
+      };
 
       struct event_t {
         u32 pid;
@@ -115,13 +118,13 @@ module Vivarium
         char payload[64];
       };
 
-      BPF_HASH(config_targets, u32, u8, 1024);
+      BPF_HASH(config_targets, u32, u32, 1024);
       BPF_ARRAY(event_invoked, struct event_t, 64);
       BPF_ARRAY(event_write_pos, u32, 1);
 
       static __always_inline int target_enabled(u32 pid)
       {
-        u8 *enabled = config_targets.lookup(&pid);
+        u32 *enabled = config_targets.lookup(&pid);
         if (!enabled) {
           return 0;
         }
@@ -176,10 +179,9 @@ module Vivarium
       FileUtils.mkdir_p(@pin_dir)
 
       f_path_offset = detect_f_path_offset
-      program = BPF_PROGRAM_TEMPLATE.sub("__VIVARIUM_F_PATH_OFFSET__", f_path_offset.to_s)
+      program = BPF_PROGRAM_TEMPLATE.gsub("__VIVARIUM_F_PATH_OFFSET__", f_path_offset.to_s)
 
       bpf = RbBCC::BCC.new(text: program)
-      bpf.attach_lsm(fn_name: "lsm__file_open")
 
       config_targets = bpf["config_targets"]
       event_invoked = bpf["event_invoked"]
