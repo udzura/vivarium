@@ -103,8 +103,9 @@ module Vivarium
 
   class Daemon
     BPF_PROGRAM = <<~CLANG
-      #include <linux/fs.h>
-      #include <linux/dcache.h>
+      struct path;
+      struct file;
+      struct cred;
 
       struct event_t {
         u32 pid;
@@ -125,7 +126,7 @@ module Vivarium
         return *enabled == 1;
       }
 
-      LSM_PROBE(file_open, struct file *file)
+      LSM_PROBE(path_open, const struct path *path, struct file *file, const struct cred *cred)
       {
         u32 pid = bpf_get_current_pid_tgid() >> 32;
         if (!target_enabled(pid)) {
@@ -142,7 +143,7 @@ module Vivarium
         struct event_t ev = {};
         ev.pid = pid;
         __builtin_memcpy(ev.event_name, "path_open", 8);
-        bpf_d_path(&file->f_path, ev.payload, sizeof(ev.payload));
+        bpf_d_path(path, ev.payload, sizeof(ev.payload));
         event_invoked.update(&idx, &ev);
 
         return 0;
@@ -158,7 +159,7 @@ module Vivarium
       FileUtils.mkdir_p(@pin_dir)
 
       bpf = RbBCC::BCC.new(text: BPF_PROGRAM)
-      bpf.attach_lsm(fn_name: "lsm__file_open")
+      bpf.attach_lsm(fn_name: "lsm__path_open")
 
       config_targets = bpf["config_targets"]
       event_invoked = bpf["event_invoked"]
@@ -173,7 +174,7 @@ module Vivarium
 
       puts "[vivariumd] started"
       puts "[vivariumd] pinned maps in #{@pin_dir}"
-      puts "[vivariumd] watching LSM file_open"
+      puts "[vivariumd] watching LSM path_open"
 
       loop do
         sleep 1

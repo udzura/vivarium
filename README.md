@@ -13,7 +13,7 @@ The goal is to visualize which Ruby method context triggered low-level events.
 
 Implemented in this repository:
 
-- BPF LSM hook on `file_open`
+- BPF LSM hook on `path_open`
 - Shared pinned maps on bpffs
 	- `config_targets` (PID -> 0/1)
 	- `event_invoked` (array length 64 with `event_t` records)
