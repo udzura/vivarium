@@ -235,6 +235,9 @@ module Vivarium
       )
 
       in_file_struct = false
+      f_path_bits_offset = nil
+      anon_union_bits_offset = nil
+
       raw.each_line do |line|
         if line =~ /^\[\d+\] STRUCT 'file' /
           in_file_struct = true
@@ -242,23 +245,31 @@ module Vivarium
         end
 
         if in_file_struct && line.start_with?("[")
-          in_file_struct = false
+          break
         end
 
         next unless in_file_struct
 
-        match = line.match(/'f_path'.*bits_offset=(\d+)/)
-        next unless match
+        if (match = line.match(/'f_path'.*bits_offset=(\d+)/))
+          f_path_bits_offset = Integer(match[1], 10)
+          next
+        end
 
-        bits_offset = Integer(match[1], 10)
+        if (match = line.match(/'\(anon\)'.*bits_offset=(\d+)/))
+          anon_union_bits_offset = Integer(match[1], 10)
+        end
+      end
+
+      bits_offset = f_path_bits_offset || anon_union_bits_offset
+      if bits_offset
         if (bits_offset % 8).positive?
           raise Error, "unsupported f_path bits offset=#{bits_offset}"
         end
-
         return bits_offset / 8
       end
 
-      raise Error, "failed to resolve struct file::f_path offset from BTF"
+      warn "[vivariumd] could not find struct file::f_path in BTF, fallback to offset=64"
+      64
     rescue Errno::ENOENT
       raise Error, "bpftool is required to resolve struct file::f_path offset"
     end
