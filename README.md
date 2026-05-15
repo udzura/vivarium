@@ -13,7 +13,7 @@ The goal is to visualize which Ruby method context triggered low-level events.
 
 Implemented in this repository:
 
-- BPF LSM hook on `path_open`
+- BPF LSM hook on `file_open`
 - Shared pinned maps on bpffs
 	- `config_targets` (PID -> 0/1)
 	- `event_invoked` (array length 64 with `event_t` records)
@@ -39,6 +39,7 @@ struct event_t {
 
 - Linux kernel/environment supporting BPF LSM
 - `libbcc` installed
+- `bpftool` installed (used to resolve `struct file::f_path` offset from BTF)
 - root privileges for `vivariumd`
 - bpffs mounted (typically `/sys/fs/bpf`)
 
@@ -105,6 +106,8 @@ bundle exec vivariumd --pin-dir /sys/fs/bpf/vivarium
 - `event_invoked` uses fixed 64 slots and wraps around when full.
 - Payload is truncated to 64 bytes in kernel space.
 - Current output format is textual and intended for iteration.
+- `vivariumd` resolves `struct file::f_path` offset from `/sys/kernel/btf/vmlinux` at startup.
+- You can override offset manually with `VIVARIUM_FILE_F_PATH_OFFSET` if auto-detection fails.
 
 ## Contributing
 

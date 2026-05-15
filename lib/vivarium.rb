@@ -102,10 +102,12 @@ module Vivarium
   end
 
   class Daemon
-    BPF_PROGRAM = <<~CLANG
-      struct path;
+    BPF_PROGRAM_TEMPLATE = <<~CLANG
+      struct path {
+        void *mnt;
+        void *dentry;
+      };
       struct file;
-      struct cred;
 
       struct event_t {
         u32 pid;
@@ -126,7 +128,7 @@ module Vivarium
         return *enabled == 1;
       }
 
-      LSM_PROBE(path_open, const struct path *path, struct file *file, const struct cred *cred)
+      LSM_PROBE(file_open, struct file *file)
       {
         u32 pid = bpf_get_current_pid_tgid() >> 32;
         if (!target_enabled(pid)) {
@@ -142,9 +144,23 @@ module Vivarium
         u32 idx = *write_pos & 63;
         __sync_fetch_and_add(write_pos, 1);
         struct event_t ev = {};
+        struct path path = {};
+        int read_ret;
+        int path_ret;
+
+        read_ret = bpf_probe_read_kernel(&path, sizeof(path), ((char *)file) + __VIVARIUM_F_PATH_OFFSET__);
         ev.pid = pid;
         __builtin_memcpy(ev.event_name, "path_open", 8);
-        bpf_d_path(path, ev.payload, sizeof(ev.payload));
+
+        if (read_ret == 0) {
+          path_ret = bpf_d_path(&path, ev.payload, sizeof(ev.payload));
+          if (path_ret < 0) {
+            __builtin_memcpy(ev.payload, "<path_error>", 12);
+          }
+        } else {
+          __builtin_memcpy(ev.payload, "<path_unreadable>", 16);
+        }
+
         event_invoked.update(&idx, &ev);
 
         return 0;
@@ -159,8 +175,11 @@ module Vivarium
       ensure_root!
       FileUtils.mkdir_p(@pin_dir)
 
-      bpf = RbBCC::BCC.new(text: BPF_PROGRAM)
-      bpf.attach_lsm(fn_name: "lsm__path_open")
+      f_path_offset = detect_f_path_offset
+      program = BPF_PROGRAM_TEMPLATE.sub("__VIVARIUM_F_PATH_OFFSET__", f_path_offset.to_s)
+
+      bpf = RbBCC::BCC.new(text: program)
+      bpf.attach_lsm(fn_name: "lsm__file_open")
 
       config_targets = bpf["config_targets"]
       event_invoked = bpf["event_invoked"]
@@ -175,7 +194,7 @@ module Vivarium
 
       puts "[vivariumd] started"
       puts "[vivariumd] pinned maps in #{@pin_dir}"
-      puts "[vivariumd] watching LSM path_open"
+      puts "[vivariumd] watching LSM file_open (f_path offset=#{f_path_offset})"
 
       loop do
         sleep 1
@@ -203,6 +222,45 @@ module Vivarium
       EVENT_CAPACITY.times do |idx|
         table[idx] = ptr
       end
+    end
+
+    def detect_f_path_offset
+      env_offset = ENV["VIVARIUM_FILE_F_PATH_OFFSET"]
+      return Integer(env_offset, 10) if env_offset
+
+      raw = IO.popen(
+        %w[bpftool btf dump file /sys/kernel/btf/vmlinux format raw],
+        err: IO::NULL,
+        &:read
+      )
+
+      in_file_struct = false
+      raw.each_line do |line|
+        if line =~ /^\[\d+\] STRUCT 'file' /
+          in_file_struct = true
+          next
+        end
+
+        if in_file_struct && line.start_with?("[")
+          in_file_struct = false
+        end
+
+        next unless in_file_struct
+
+        match = line.match(/'f_path'.*bits_offset=(\d+)/)
+        next unless match
+
+        bits_offset = Integer(match[1], 10)
+        if (bits_offset % 8).positive?
+          raise Error, "unsupported f_path bits offset=#{bits_offset}"
+        end
+
+        return bits_offset / 8
+      end
+
+      raise Error, "failed to resolve struct file::f_path offset from BTF"
+    rescue Errno::ENOENT
+      raise Error, "bpftool is required to resolve struct file::f_path offset"
     end
   end
 
