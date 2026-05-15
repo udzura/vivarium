@@ -139,7 +139,8 @@ module Vivarium
           return 0;
         }
 
-        u32 idx = __sync_fetch_and_add(write_pos, 1) & 63;
+        u32 idx = *write_pos & 63;
+        __sync_fetch_and_add(write_pos, 1);
         struct event_t ev = {};
         ev.pid = pid;
         __builtin_memcpy(ev.event_name, "path_open", 8);
