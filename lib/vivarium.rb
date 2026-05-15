@@ -147,21 +147,13 @@ module Vivarium
         u32 idx = *write_pos & 63;
         __sync_fetch_and_add(write_pos, 1);
         struct event_t ev = {};
-        struct path path = {};
-        int read_ret;
         int path_ret;
-
-        read_ret = bpf_probe_read_kernel(&path, sizeof(path), ((char *)file) + __VIVARIUM_F_PATH_OFFSET__);
         ev.pid = pid;
         __builtin_memcpy(ev.event_name, "path_open", 8);
 
-        if (read_ret == 0) {
-          path_ret = bpf_d_path(&path, ev.payload, sizeof(ev.payload));
-          if (path_ret < 0) {
-            __builtin_memcpy(ev.payload, "<path_error>", 12);
-          }
-        } else {
-          __builtin_memcpy(ev.payload, "<path_unreadable>", 16);
+        path_ret = bpf_d_path(&file->f_path, ev.payload, sizeof(ev.payload));
+        if (path_ret < 0) {
+          __builtin_memcpy(ev.payload, "<path_error>", 12);
         }
 
         event_invoked.update(&idx, &ev);
