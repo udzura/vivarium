@@ -1,5 +1,9 @@
 # Vivarium
 
+[![Gem Version](https://badge.fury.io/rb/vivarium.svg)](https://rubygems.org/gems/vivarium)
+
+RubyGems: https://rubygems.org/gems/vivarium
+
 Vivarium is an observation and sandbox helper for Ruby.
 
 It combines:
