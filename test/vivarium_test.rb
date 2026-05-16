@@ -14,8 +14,8 @@ class VivariumTest < Test::Unit::TestCase
     event = Vivarium::Event.from_binary(binary)
 
     assert_equal 1234, event.pid
-    assert_equal "path_open", event.event_name
-    assert_equal "/tmp/a.txt", event.payload
+    assert_equal "path_open", event.event_name.force_encoding("UTF-8")
+    assert_equal "/tmp/a.txt", event.payload.force_encoding("UTF-8")
   end
 
   test "observe without block is supported" do
