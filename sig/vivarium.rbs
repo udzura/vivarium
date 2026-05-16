@@ -31,6 +31,8 @@ module Vivarium
   end
 
   PIN_DIR: String
+  CONFIG_ROOT_TARGETS_PIN: String
+  CONFIG_SPAWNED_TARGETS_PIN: String
   CONFIG_TARGETS_PIN: String
   EVENT_INVOKED_PIN: String
   EVENT_WRITE_POS_PIN: String

@@ -19,11 +19,13 @@ Implemented in this repository:
 
 - BPF LSM hook on `file_open`
 - Shared pinned maps on bpffs
-	- `config_targets` (PID -> 0/1)
+	- `config_root_targets` (root PID -> 0/1)
+	- `config_spawned_targets` (spawned TID -> 0/1)
 	- `event_invoked` (array length 64 with `event_t` records)
 	- `event_write_pos` (cursor for appending into `event_invoked`)
 - Ruby API `Vivarium.observe do ... end`
-	- Registers current PID to `config_targets`
+	- Registers current PID to `config_root_targets`
+	- eBPF tracks spawned descendants into `config_spawned_targets` via `sched_process_fork`
 	- On each `:return` / `:c_return`, drains `event_invoked`
 	- Prints stack trace + events
 	- Clears event slots and cursor
@@ -75,7 +77,7 @@ sudo bundle exec vivariumd
 require "vivarium"
 
 Vivarium.observe do
-	File.read("/etc/hosts")
+  File.read("/etc/hosts")
 end
 ```
 
@@ -84,8 +86,10 @@ You can also start top-level observation without a block (it keeps observing unt
 ```ruby
 require "vivarium"
 
-Vivarium.top_observe
+observer = Vivarium.top_observe
 # or: Vivarium.observe
+# do anything ...
+observer.stop
 ```
 
 By default, Vivarium excludes its own internal frames from stack output. Set `VIVARIUM_FILTER_INTERNAL_FRAMES=0` to disable this filter.

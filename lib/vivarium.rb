@@ -12,7 +12,9 @@ module Vivarium
   class Error < StandardError; end
 
   PIN_DIR = ENV.fetch("VIVARIUM_BPF_PIN_DIR", "/sys/fs/bpf/vivarium")
-  CONFIG_TARGETS_PIN = File.join(PIN_DIR, "config_targets")
+  CONFIG_ROOT_TARGETS_PIN = File.join(PIN_DIR, "config_root_targets")
+  CONFIG_SPAWNED_TARGETS_PIN = File.join(PIN_DIR, "config_spawned_targets")
+  CONFIG_TARGETS_PIN = CONFIG_ROOT_TARGETS_PIN
   EVENT_INVOKED_PIN = File.join(PIN_DIR, "event_invoked")
   EVENT_WRITE_POS_PIN = File.join(PIN_DIR, "event_write_pos")
 
@@ -31,18 +33,33 @@ module Vivarium
       bytes = bytes.ljust(EVENT_STRUCT_SIZE, "\x00")
 
       pid = bytes[0, 4].unpack1("L<")
-      event_name = bytes[4, EVENT_NAME_SIZE].delete("\x00")
-      payload = bytes[4 + EVENT_NAME_SIZE, EVENT_PAYLOAD_SIZE].delete("\x00")
+      event_name = c_string(bytes[4, EVENT_NAME_SIZE])
+      payload = c_string(bytes[4 + EVENT_NAME_SIZE, EVENT_PAYLOAD_SIZE])
 
       new(pid: pid, event_name: event_name, payload: payload)
+    end
+
+    def self.c_string(bytes)
+      str = bytes.to_s.b
+      nul = str.index("\x00")
+      return str if nul.nil?
+
+      str[0, nul]
     end
   end
 
   class MapStore
     def initialize(pin_dir: PIN_DIR)
       @pin_dir = pin_dir
-      @config_targets = RbBCC::HashTable.from_pin(
-        File.join(@pin_dir, "config_targets"),
+      @config_root_targets = RbBCC::HashTable.from_pin(
+        File.join(@pin_dir, "config_root_targets"),
+        "unsigned int",
+        "unsigned char",
+        keysize: 4,
+        leafsize: 1
+      )
+      @config_spawned_targets = RbBCC::HashTable.from_pin(
+        File.join(@pin_dir, "config_spawned_targets"),
         "unsigned int",
         "unsigned char",
         keysize: 4,
@@ -67,11 +84,12 @@ module Vivarium
     end
 
     def register_pid(pid)
-      @config_targets[pid] = 1
+      @config_root_targets[pid] = 1
     end
 
     def unregister_pid(pid)
-      @config_targets.delete(pid)
+      @config_root_targets.delete(pid)
+      @config_spawned_targets.clear
     rescue KeyError
       nil
     end
@@ -119,24 +137,60 @@ module Vivarium
         char payload[#{EVENT_PAYLOAD_SIZE}];
       };
 
-      BPF_HASH(config_targets, u32, u8, 1024);
+      BPF_HASH(config_root_targets, u32, u8, 1024);
+      BPF_HASH(config_spawned_targets, u32, u8, 8192);
       BPF_ARRAY(event_invoked, struct event_t, 1024);
       BPF_ARRAY(event_write_pos, u32, 1);
 
-      static __always_inline int target_enabled(u32 pid)
+      static __always_inline int target_enabled(u32 pid, u32 tid)
       {
-        u8 *enabled = config_targets.lookup(&pid);
-        if (!enabled) {
+        u8 *enabled_root = config_root_targets.lookup(&pid);
+        if (enabled_root && *enabled_root == 1) {
+          return 1;
+        }
+
+        u8 *enabled_spawned = config_spawned_targets.lookup(&tid);
+        if (enabled_spawned && *enabled_spawned == 1) {
+          return 1;
+        }
+
+        return 0;
+      }
+
+      TRACEPOINT_PROBE(sched, sched_process_fork)
+      {
+        u32 parent = args->parent_pid;
+        u32 child = args->child_pid;
+        u8 one = 1;
+
+        u8 *enabled_root = config_root_targets.lookup(&parent);
+        if (enabled_root && *enabled_root == 1) {
+          config_spawned_targets.update(&child, &one);
           return 0;
         }
-        return *enabled == 1;
+
+        u8 *enabled_spawned = config_spawned_targets.lookup(&parent);
+        if (enabled_spawned && *enabled_spawned == 1) {
+          config_spawned_targets.update(&child, &one);
+        }
+
+        return 0;
+      }
+
+      TRACEPOINT_PROBE(sched, sched_process_exit)
+      {
+        u32 tid = (u32)bpf_get_current_pid_tgid();
+        config_spawned_targets.delete(&tid);
+        return 0;
       }
 
       LSM_PROBE(file_open, struct file *file)
       {
-        u32 pid = bpf_get_current_pid_tgid() >> 32;
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
         bpf_trace_printk("vivarium: invoked pid=%d\\n", pid);
-        if (!target_enabled(pid)) {
+        if (!target_enabled(pid, tid)) {
           return 0;
         }
 
@@ -182,14 +236,17 @@ module Vivarium
       bpf = RbBCC::BCC.new(text: program)
       kprint_thread = start_kprint_logger(bpf)
 
-      config_targets = bpf["config_targets"]
+      config_root_targets = bpf["config_root_targets"]
+      config_spawned_targets = bpf["config_spawned_targets"]
       event_invoked = bpf["event_invoked"]
       event_write_pos = bpf["event_write_pos"]
 
       clear_event_slots(event_invoked)
       event_write_pos[0] = 0
+      config_spawned_targets.clear
 
-      pin_map(config_targets, File.join(@pin_dir, "config_targets"))
+      pin_map(config_root_targets, File.join(@pin_dir, "config_root_targets"))
+      pin_map(config_spawned_targets, File.join(@pin_dir, "config_spawned_targets"))
       pin_map(event_invoked, File.join(@pin_dir, "event_invoked"))
       pin_map(event_write_pos, File.join(@pin_dir, "event_write_pos"))
 
