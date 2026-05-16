@@ -17,7 +17,7 @@ module Vivarium
   EVENT_WRITE_POS_PIN = File.join(PIN_DIR, "event_write_pos")
 
   EVENT_NAME_SIZE = 16
-  EVENT_PAYLOAD_SIZE = 64
+  EVENT_PAYLOAD_SIZE = 256
   EVENT_STRUCT_SIZE = 4 + EVENT_NAME_SIZE + EVENT_PAYLOAD_SIZE
   EVENT_CAPACITY = 64
 
@@ -116,11 +116,11 @@ module Vivarium
       struct event_t {
         u32 pid;
         char event_name[16];
-        char payload[64];
+        char payload[#{EVENT_PAYLOAD_SIZE}];
       };
 
       BPF_HASH(config_targets, u32, u8, 1024);
-      BPF_ARRAY(event_invoked, struct event_t, 64);
+      BPF_ARRAY(event_invoked, struct event_t, 1024);
       BPF_ARRAY(event_write_pos, u32, 1);
 
       static __always_inline int target_enabled(u32 pid)
@@ -146,7 +146,7 @@ module Vivarium
           return 0;
         }
 
-        u32 idx = *write_pos & 63;
+        u32 idx = *write_pos & 1023;
         __sync_fetch_and_add(write_pos, 1);
         struct event_t ev = {};
         int path_ret;
@@ -155,7 +155,10 @@ module Vivarium
 
         path_ret = bpf_d_path(&file->f_path, ev.payload, sizeof(ev.payload));
         if (path_ret < 0) {
-          __builtin_memcpy(ev.payload, "<path_error>", 13);
+          if (ev.payload[0] == 0) {
+            __builtin_memcpy(ev.payload, "<path_error>", 13);
+            bpf_trace_printk("vivarium: failed to obtain full path. pid=%d path=%s\\n", pid, ev.payload);
+          }
         }
 
         bpf_trace_printk("vivarium: pid=%d path=%s\\n", pid, ev.payload);
