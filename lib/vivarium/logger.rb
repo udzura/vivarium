@@ -43,6 +43,7 @@ module Vivarium
 
     def log_human(events, tp, stack)
       @io.puts "[vivarium] #{events.size} event(s) at #{tp.defined_class}##{tp.method_id} (#{tp.event})"
+      @io.puts "  location: #{tp.path}:#{tp.lineno}"
       events.each do |event|
         @io.puts "  pid=#{event.pid} #{event.event_name} payload=#{event.payload.inspect}"
       end
@@ -56,6 +57,8 @@ module Vivarium
       entry = {
         at:     "#{tp.defined_class}##{tp.method_id}",
         event:  tp.event.to_s,
+        path:   tp.path,
+        lineno: tp.lineno,
         events: events.map { |e| { pid: e.pid, event_name: e.event_name, payload: e.payload } },
         stack:  stack.map { |loc| "#{loc.path}:#{loc.lineno}:in #{loc.base_label}" }
       }
