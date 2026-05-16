@@ -79,6 +79,15 @@ Vivarium.observe do
 end
 ```
 
+You can also start top-level observation without a block (it keeps observing until process exit):
+
+```ruby
+require "vivarium"
+
+Vivarium.top_observe
+# or: Vivarium.observe
+```
+
 By default, Vivarium excludes its own internal frames from stack output. Set `VIVARIUM_FILTER_INTERNAL_FRAMES=0` to disable this filter.
 
 You can override pin directory via `VIVARIUM_BPF_PIN_DIR` on both sides:

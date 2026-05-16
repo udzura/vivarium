@@ -309,16 +309,62 @@ module Vivarium
     end
   end
 
-  def self.observe(pin_dir: PIN_DIR, logger: nil, dest: $stdout, format: :human)
-    raise ArgumentError, "block is required" unless block_given?
+  class ObservationSession
+    def initialize(store:, pid:, tracer:)
+      @store = store
+      @pid = pid
+      @tracer = tracer
+      @stopped = false
+    end
 
+    def stop
+      return if @stopped
+
+      @tracer.disable
+      @store.unregister_pid(@pid)
+      @stopped = true
+    end
+  end
+
+  def self.observe(pin_dir: PIN_DIR, logger: nil, dest: $stdout, format: :human)
+    return scoped_observe(pin_dir: pin_dir, logger: logger, dest: dest, format: format) { yield } if block_given?
+
+    top_observe(pin_dir: pin_dir, logger: logger, dest: dest, format: format)
+  end
+
+  def self.top_observe(pin_dir: PIN_DIR, logger: nil, dest: $stdout, format: :human)
     logger ||= Logger.new(dest: dest, format: format)
     store = MapStore.new(pin_dir: pin_dir)
     pid = Process.pid
     store.register_pid(pid)
-    logger.info("[vivarium] observing with pid=#{pid}")
+    logger.info("top-level observing with pid=#{pid}")
 
-    tracer = TracePoint.new(:return, :c_return) do |tp|
+    tracer = build_observe_tracepoint(store, logger)
+    tracer.enable
+
+    session = ObservationSession.new(store: store, pid: pid, tracer: tracer)
+    at_exit { session.stop }
+    session
+  end
+
+  def self.scoped_observe(pin_dir:, logger:, dest:, format:)
+    logger ||= Logger.new(dest: dest, format: format)
+    store = MapStore.new(pin_dir: pin_dir)
+    pid = Process.pid
+    store.register_pid(pid)
+    logger.info("scoped observing with pid=#{pid}")
+
+    tracer = build_observe_tracepoint(store, logger)
+    tracer.enable
+
+    yield
+  ensure
+    tracer&.disable
+    store&.unregister_pid(pid)
+  end
+
+  def self.build_observe_tracepoint(store, logger)
+    TracePoint.new(:return, :c_return) do |tp|
       events = store.drain_events
       next if events.empty?
 
@@ -326,12 +372,6 @@ module Vivarium
       stack = stack.reject { |loc| loc.path.to_s.include?("vivarium") } if filter_internal_frames?
       logger.log(events, tp, stack)
     end
-
-    tracer.enable
-    yield
-  ensure
-    tracer&.disable
-    store&.unregister_pid(pid)
   end
 
   def self.filter_internal_frames?

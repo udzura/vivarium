@@ -21,9 +21,13 @@ module Vivarium
   end
 
   class Daemon
-    BPF_PROGRAM: String
+    BPF_PROGRAM_TEMPLATE: String
     def initialize: (?pin_dir: String pin_dir) -> void
     def run: () -> void
+  end
+
+  class ObservationSession
+    def stop: () -> void
   end
 
   PIN_DIR: String
@@ -36,6 +40,8 @@ module Vivarium
   EVENT_STRUCT_SIZE: Integer
   EVENT_CAPACITY: Integer
 
-  def self.observe: (?pin_dir: String pin_dir, ?out: untyped out) { () -> untyped } -> untyped
+  def self.observe: (?pin_dir: String pin_dir, ?logger: untyped logger, ?dest: untyped dest, ?format: Symbol format) { () -> untyped } -> untyped
+  def self.top_observe: (?pin_dir: String pin_dir, ?logger: untyped logger, ?dest: untyped dest, ?format: Symbol format) -> ObservationSession
+  def self.filter_internal_frames?: () -> bool
   def self.run_daemon!: (?Array[String] argv) -> void
 end
