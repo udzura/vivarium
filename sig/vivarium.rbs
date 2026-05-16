@@ -42,6 +42,8 @@ module Vivarium
   EVENT_STRUCT_SIZE: Integer
   EVENT_CAPACITY: Integer
 
+  def self.bpf_pin_dir: () -> String
+  def self.bpf_pin_dir=: (String dir) -> String
   def self.observe: (?pin_dir: String pin_dir, ?logger: untyped logger, ?dest: untyped dest, ?format: Symbol format) { () -> untyped } -> untyped
   def self.top_observe: (?pin_dir: String pin_dir, ?logger: untyped logger, ?dest: untyped dest, ?format: Symbol format) -> ObservationSession
   def self.filter_internal_frames?: () -> bool

@@ -77,7 +77,7 @@ sudo bundle exec vivariumd
 require "vivarium"
 
 Vivarium.observe do
-  File.read("/etc/hosts")
+  File.read("/etc/passwd")
 end
 ```
 
@@ -100,9 +100,11 @@ You can override pin directory via `VIVARIUM_BPF_PIN_DIR` on both sides:
 VIVARIUM_BPF_PIN_DIR=/sys/fs/bpf/vivarium bundle exec vivariumd
 ```
 
+Use `Vivarium.bpf_pin_dir = "/sys/fs/bpf/..."` in Ruby code to set it programmatically.
+
 ```ruby
-ENV["VIVARIUM_BPF_PIN_DIR"] = "/sys/fs/bpf/vivarium"
 require "vivarium"
+Vivarium.bpf_pin_dir = "/sys/fs/bpf/vivarium"
 ```
 
 ## Development

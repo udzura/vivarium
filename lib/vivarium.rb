@@ -23,6 +23,16 @@ module Vivarium
   EVENT_STRUCT_SIZE = 4 + EVENT_NAME_SIZE + EVENT_PAYLOAD_SIZE
   EVENT_CAPACITY = 64
 
+  @bpf_pin_dir = PIN_DIR
+
+  class << self
+    attr_writer :bpf_pin_dir
+
+    def bpf_pin_dir
+      @bpf_pin_dir || PIN_DIR
+    end
+  end
+
   Event = Struct.new(:pid, :event_name, :payload, keyword_init: true) do
     def empty?
       pid.to_i.zero? && event_name.to_s.empty? && payload.to_s.empty?
@@ -49,7 +59,7 @@ module Vivarium
   end
 
   class MapStore
-    def initialize(pin_dir: PIN_DIR)
+    def initialize(pin_dir: Vivarium.bpf_pin_dir)
       @pin_dir = pin_dir
       @config_root_targets = RbBCC::HashTable.from_pin(
         File.join(@pin_dir, "config_root_targets"),
@@ -222,7 +232,7 @@ module Vivarium
       }
     CLANG
 
-    def initialize(pin_dir: PIN_DIR)
+    def initialize(pin_dir: Vivarium.bpf_pin_dir)
       @pin_dir = pin_dir
     end
 
@@ -386,13 +396,13 @@ module Vivarium
     end
   end
 
-  def self.observe(pin_dir: PIN_DIR, logger: nil, dest: $stdout, format: :human)
+  def self.observe(pin_dir: bpf_pin_dir, logger: nil, dest: $stdout, format: :human)
     return scoped_observe(pin_dir: pin_dir, logger: logger, dest: dest, format: format) { yield } if block_given?
 
     top_observe(pin_dir: pin_dir, logger: logger, dest: dest, format: format)
   end
 
-  def self.top_observe(pin_dir: PIN_DIR, logger: nil, dest: $stdout, format: :human)
+  def self.top_observe(pin_dir: bpf_pin_dir, logger: nil, dest: $stdout, format: :human)
     logger ||= Logger.new(dest: dest, format: format)
     store = MapStore.new(pin_dir: pin_dir)
     pid = Process.pid
@@ -442,7 +452,7 @@ module Vivarium
   end
 
   def self.run_daemon!(argv = ARGV)
-    options = { pin_dir: PIN_DIR }
+    options = { pin_dir: bpf_pin_dir }
     OptionParser.new do |opts|
       opts.banner = "Usage: vivariumd [--pin-dir PATH]"
       opts.on("--pin-dir PATH", "Pinned map directory") { |v| options[:pin_dir] = v }
