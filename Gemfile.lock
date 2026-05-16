@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    vivarium (0.0.1)
+    vivarium (0.1.0)
       rbbcc (~> 0.11.3)
 
 GEM
@@ -66,7 +66,7 @@ CHECKSUMS
   stringio (3.2.0) sha256=c37cb2e58b4ffbd33fe5cd948c05934af997b36e0b6ca6fdf43afa234cf222e1
   test-unit (3.7.7) sha256=3c89d5ff0690a16bef9946156c4624390402b9d54dfcf4ce9cbd5b06bead1e45
   tsort (0.2.0) sha256=9650a793f6859a43b6641671278f79cfead60ac714148aabe4e3f0060480089f
-  vivarium (0.0.1)
+  vivarium (0.1.0)
 
 BUNDLED WITH
   4.0.6
