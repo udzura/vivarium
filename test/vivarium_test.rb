@@ -10,7 +10,7 @@ class VivariumTest < Test::Unit::TestCase
   end
 
   test "event can be parsed from binary payload" do
-    binary = [1234].pack("L<") + "path_open" + "/tmp/a.txt".ljust(64, "\x00")
+    binary = [1234].pack("L<") + "path_open".ljust(16, "\x00") + "/tmp/a.txt".ljust(64, "\x00")
     event = Vivarium::Event.from_binary(binary)
 
     assert_equal 1234, event.pid
