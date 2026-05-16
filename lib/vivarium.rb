@@ -6,6 +6,7 @@ require "optparse"
 require "pathname"
 require "rbbcc"
 require_relative "vivarium/version"
+require_relative "vivarium/logger"
 
 module Vivarium
   class Error < StandardError; end
@@ -118,13 +119,13 @@ module Vivarium
         char payload[64];
       };
 
-      BPF_HASH(config_targets, u32, u32, 1024);
+      BPF_HASH(config_targets, u32, u8, 1024);
       BPF_ARRAY(event_invoked, struct event_t, 64);
       BPF_ARRAY(event_write_pos, u32, 1);
 
       static __always_inline int target_enabled(u32 pid)
       {
-        u32 *enabled = config_targets.lookup(&pid);
+        u8 *enabled = config_targets.lookup(&pid);
         if (!enabled) {
           return 0;
         }
@@ -134,6 +135,7 @@ module Vivarium
       LSM_PROBE(file_open, struct file *file)
       {
         u32 pid = bpf_get_current_pid_tgid() >> 32;
+        bpf_trace_printk("vivarium: invoked pid=%d\\n", pid);
         if (!target_enabled(pid)) {
           return 0;
         }
@@ -156,6 +158,7 @@ module Vivarium
           __builtin_memcpy(ev.payload, "<path_error>", 13);
         }
 
+        bpf_trace_printk("vivarium: pid=%d path=%s\\n", pid, ev.payload);
         event_invoked.update(&idx, &ev);
 
         return 0;
@@ -174,6 +177,7 @@ module Vivarium
       program = BPF_PROGRAM_TEMPLATE.gsub("__VIVARIUM_F_PATH_OFFSET__", f_path_offset.to_s)
 
       bpf = RbBCC::BCC.new(text: program)
+      kprint_thread = start_kprint_logger(bpf)
 
       config_targets = bpf["config_targets"]
       event_invoked = bpf["event_invoked"]
@@ -189,12 +193,18 @@ module Vivarium
       puts "[vivariumd] started"
       puts "[vivariumd] pinned maps in #{@pin_dir}"
       puts "[vivariumd] watching LSM file_open (f_path offset=#{f_path_offset})"
+      puts "[vivariumd] kprint logger enabled"
 
       loop do
         sleep 1
       end
     rescue Interrupt
       puts "\n[vivariumd] stopping"
+    ensure
+      if kprint_thread
+        kprint_thread.kill
+        kprint_thread.join(0.2)
+      end
     end
 
     private
@@ -216,6 +226,26 @@ module Vivarium
       EVENT_CAPACITY.times do |idx|
         table[idx] = ptr
       end
+    end
+
+    def start_kprint_logger(bpf)
+      Thread.new do
+        begin
+          bpf.trace_fields do |_task, pid, _cpu, _flags, ts, msg|
+            line = msg.to_s.strip
+            next unless line.start_with?("vivarium:")
+
+            puts "[vivariumd:kprint #{ts} pid=#{pid}] #{line}"
+          end
+        rescue IOError, Errno::EINTR
+          nil
+        rescue StandardError => e
+          warn "[vivariumd] kprint stream stopped: #{e.class}: #{e.message}"
+        end
+      end
+    rescue StandardError => e
+      warn "[vivariumd] failed to start kprint logger: #{e.class}: #{e.message}"
+      nil
     end
 
     def detect_f_path_offset
@@ -279,25 +309,22 @@ module Vivarium
     end
   end
 
-  def self.observe(pin_dir: PIN_DIR, out: $stdout)
+  def self.observe(pin_dir: PIN_DIR, logger: nil, dest: $stdout, format: :human)
     raise ArgumentError, "block is required" unless block_given?
 
+    logger ||= Logger.new(dest: dest, format: format)
     store = MapStore.new(pin_dir: pin_dir)
     pid = Process.pid
     store.register_pid(pid)
+    logger.info("[vivarium] observing with pid=#{pid}")
 
     tracer = TracePoint.new(:return, :c_return) do |tp|
       events = store.drain_events
       next if events.empty?
 
-      out.puts "[vivarium] #{events.size} event(s) at #{tp.defined_class}##{tp.method_id} (#{tp.event})"
-      events.each do |event|
-        out.puts "  pid=#{event.pid} #{event.event_name} payload=#{event.payload.inspect}"
-      end
-      out.puts "  stack:"
-      caller_locations(0, 12).each do |loc|
-        out.puts "    #{loc.path}:#{loc.lineno}:in #{loc.base_label}"
-      end
+      stack = caller_locations(2, 16)
+      stack = stack.reject { |loc| loc.path.to_s.include?("vivarium") } if filter_internal_frames?
+      logger.log(events, tp, stack)
     end
 
     tracer.enable
@@ -305,6 +332,13 @@ module Vivarium
   ensure
     tracer&.disable
     store&.unregister_pid(pid)
+  end
+
+  def self.filter_internal_frames?
+    value = ENV["VIVARIUM_FILTER_INTERNAL_FRAMES"]
+    return true if value.nil?
+
+    !%w[0 false off no].include?(value.strip.downcase)
   end
 
   def self.run_daemon!(argv = ARGV)

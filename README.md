@@ -79,6 +79,8 @@ Vivarium.observe do
 end
 ```
 
+By default, Vivarium excludes its own internal frames from stack output. Set `VIVARIUM_FILTER_INTERNAL_FRAMES=0` to disable this filter.
+
 You can override pin directory via `VIVARIUM_BPF_PIN_DIR` on both sides:
 
 ```bash
@@ -112,6 +114,7 @@ bundle exec vivariumd --pin-dir /sys/fs/bpf/vivarium
 - Current output format is textual and intended for iteration.
 - `vivariumd` resolves `struct file::f_path` offset from `/sys/kernel/btf/vmlinux` at startup.
 - You can override offset manually with `VIVARIUM_FILE_F_PATH_OFFSET` if auto-detection fails.
+- `vivariumd` also prints `bpf_trace_printk` lines (`vivarium: pid=... path=...`) to its own logs.
 
 ## Contributing
 
