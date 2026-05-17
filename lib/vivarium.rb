@@ -257,6 +257,31 @@ module Vivarium
         u32 sin6_scope_id;
       };
 
+      struct sockaddr_port_t {
+        u16 family;
+        u16 port;
+      };
+
+      struct iovec_t {
+        void *iov_base;
+        unsigned long iov_len;
+      };
+
+      struct user_msghdr_t {
+        void *msg_name;
+        int msg_namelen;
+        struct iovec_t *msg_iov;
+        unsigned long msg_iovlen;
+        void *msg_control;
+        unsigned long msg_controllen;
+        unsigned int msg_flags;
+      };
+
+      struct mmsghdr_t {
+        struct user_msghdr_t msg_hdr;
+        unsigned int msg_len;
+      };
+
       struct sk_buff_t {
         unsigned char *head;
         unsigned char *data;
@@ -274,6 +299,7 @@ module Vivarium
 
       BPF_HASH(config_root_targets, u32, u8, 1024);
       BPF_HASH(config_spawned_targets, u32, u8, 8192);
+      BPF_HASH(dns_connected_tids, u32, u8, 8192);
       BPF_ARRAY(event_invoked, struct event_t, #{EVENT_CAPACITY});
       BPF_ARRAY(event_write_pos, u32, 1);
 
@@ -305,6 +331,46 @@ module Vivarium
         event_invoked.update(&idx, ev);
       }
 
+      static __always_inline int is_dns_destination(void *addr)
+      {
+        u16 family = 0;
+        bpf_probe_read_user(&family, sizeof(family), addr);
+
+        if (family == AF_INET) {
+          struct sockaddr_in_t sin = {};
+          bpf_probe_read_user(&sin, sizeof(sin), addr);
+          return sin.sin_port == __constant_htons(53);
+        }
+
+        if (family == AF_INET6) {
+          struct sockaddr_in6_t sin6 = {};
+          bpf_probe_read_user(&sin6, sizeof(sin6), addr);
+          return sin6.sin6_port == __constant_htons(53);
+        }
+
+        return 0;
+      }
+
+      static __always_inline void submit_dns_req(u32 pid, unsigned char *payload, unsigned int payload_len)
+      {
+        unsigned int copy_len = payload_len;
+
+        if (copy_len <= 12) {
+          return;
+        }
+
+        copy_len -= 12;
+        if (copy_len > 64) {
+          copy_len = 64;
+        }
+
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "dns_req", 8);
+        bpf_probe_read_user(&ev.payload[0], copy_len, payload + 12);
+        submit_event(&ev);
+      }
+
       TRACEPOINT_PROBE(sched, sched_process_fork)
       {
         u32 parent = args->parent_pid;
@@ -329,6 +395,7 @@ module Vivarium
       {
         u32 tid = (u32)bpf_get_current_pid_tgid();
         config_spawned_targets.delete(&tid);
+        dns_connected_tids.delete(&tid);
         return 0;
       }
 
@@ -396,6 +463,7 @@ module Vivarium
         u32 pid = pid_tgid >> 32;
         u32 tid = (u32)pid_tgid;
         u16 family = 0;
+        u8 one = 1;
 
         if (!target_enabled(pid, tid)) {
           return 0;
@@ -417,11 +485,17 @@ module Vivarium
           bpf_probe_read_kernel(&sin, sizeof(sin), address);
           __builtin_memcpy(&ev.payload[2], &sin.sin_port, sizeof(sin.sin_port));
           __builtin_memcpy(&ev.payload[4], &sin.sin_addr, sizeof(sin.sin_addr));
+          if (sin.sin_port == __constant_htons(53)) {
+            dns_connected_tids.update(&tid, &one);
+          }
         } else if (family == AF_INET6) {
           struct sockaddr_in6_t sin6 = {};
           bpf_probe_read_kernel(&sin6, sizeof(sin6), address);
           __builtin_memcpy(&ev.payload[2], &sin6.sin6_port, sizeof(sin6.sin6_port));
           __builtin_memcpy(&ev.payload[4], &sin6.sin6_addr, sizeof(sin6.sin6_addr));
+          if (sin6.sin6_port == __constant_htons(53)) {
+            dns_connected_tids.update(&tid, &one);
+          }
         }
 
         submit_event(&ev);
@@ -429,48 +503,105 @@ module Vivarium
         return 0;
       }
 
-      int kprobe__ip_local_out(struct pt_regs *ctx, struct net *net, struct sock *sk, struct sk_buff *skb)
+      TRACEPOINT_PROBE(syscalls, sys_enter_sendmsg)
       {
         u64 pid_tgid = bpf_get_current_pid_tgid();
         u32 pid = pid_tgid >> 32;
         u32 tid = (u32)pid_tgid;
-        struct sk_buff_t skbv = {};
-        struct iphdr iph = {};
-        struct udphdr udph = {};
-        unsigned char *iph_ptr;
-        unsigned char *udph_ptr;
-        unsigned char *dns_ptr;
+        struct user_msghdr_t msg = {};
+        struct iovec_t iov = {};
 
         if (!target_enabled(pid, tid)) {
           return 0;
         }
 
-        if (!skb) {
+        if (!args->msg) {
           return 0;
         }
 
-        bpf_probe_read_kernel(&skbv, sizeof(skbv), skb);
-
-        iph_ptr = skbv.head + skbv.network_header;
-        udph_ptr = skbv.head + skbv.transport_header;
-
-        bpf_probe_read_kernel(&iph, sizeof(iph), iph_ptr);
-        if (iph.protocol != IPPROTO_UDP) {
+        bpf_probe_read_user(&msg, sizeof(msg), args->msg);
+        if (!msg.msg_iov || msg.msg_iovlen == 0) {
           return 0;
         }
 
-        bpf_probe_read_kernel(&udph, sizeof(udph), udph_ptr);
-        if (udph.dest != __constant_htons(53)) {
+        if (msg.msg_name && !is_dns_destination(msg.msg_name)) {
           return 0;
         }
 
-        dns_ptr = udph_ptr + sizeof(struct udphdr) + 12;
+        bpf_probe_read_user(&iov, sizeof(iov), msg.msg_iov);
+        if (!iov.iov_base) {
+          return 0;
+        }
 
-        struct event_t ev = {};
-        ev.pid = pid;
-        __builtin_memcpy(ev.event_name, "dns_req", 8);
-        bpf_probe_read_kernel(&ev.payload[0], 64, dns_ptr);
-        submit_event(&ev);
+        submit_dns_req(pid, (unsigned char *)iov.iov_base, (unsigned int)iov.iov_len);
+
+        return 0;
+      }
+
+      TRACEPOINT_PROBE(syscalls, sys_enter_sendto)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+        unsigned char *buff = args->buff;
+        int dns_match = 0;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        if (!buff) {
+          return 0;
+        }
+
+        if (args->addr) {
+          dns_match = is_dns_destination(args->addr);
+        } else {
+          u8 *connected = dns_connected_tids.lookup(&tid);
+          dns_match = connected && *connected == 1;
+        }
+
+        if (!dns_match) {
+          return 0;
+        }
+
+        submit_dns_req(pid, buff, args->len);
+        dns_connected_tids.delete(&tid);
+
+        return 0;
+      }
+
+      TRACEPOINT_PROBE(syscalls, sys_enter_sendmmsg)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+        struct mmsghdr_t mmsg = {};
+        struct iovec_t iov = {};
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        if (!args->mmsg) {
+          return 0;
+        }
+
+        bpf_probe_read_user(&mmsg, sizeof(mmsg), args->mmsg);
+        if (mmsg.msg_hdr.msg_name && !is_dns_destination(mmsg.msg_hdr.msg_name)) {
+          return 0;
+        }
+
+        if (!mmsg.msg_hdr.msg_iov || mmsg.msg_hdr.msg_iovlen == 0) {
+          return 0;
+        }
+
+        bpf_probe_read_user(&iov, sizeof(iov), mmsg.msg_hdr.msg_iov);
+        if (!iov.iov_base) {
+          return 0;
+        }
+
+        submit_dns_req(pid, (unsigned char *)iov.iov_base, (unsigned int)iov.iov_len);
 
         return 0;
       }
