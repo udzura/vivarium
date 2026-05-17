@@ -18,17 +18,23 @@ end
 Vivarium.observe do
   # Likely emits sock_connect and dns_req via resolver traffic.
   try_step("system: DNS lookup") do
-    system("getent hosts dns-lookup.example.com >/dev/null 2>&1 || true")
+    system("getent hosts example.com >/dev/null 2>&1 || true")
+    system("getent hosts unknown.example.com >/dev/null 2>&1 || true")
   end
 
   # Likely emits sock_connect through HTTPS connection attempts.
   try_step("system: curl") do
-    system("curl -I https://curl.example.com >/dev/null 2>&1 || true")
+    system("curl -I https://example.com >/dev/null 2>&1 || true")
+  end
+
+  # ICMP example (may require CAP_NET_RAW / root depending on environment).
+  try_step("system: ping") do
+    system("ping -c 1 example.com >/dev/null 2>&1 || true")
   end
 
   # Explicit connect path.
   try_step("Ruby TCP connect") do
-    sock = TCPSocket.new("tcp.example.com", 80)
+    sock = TCPSocket.new("example.com", 80)
     sock.close
   end
 

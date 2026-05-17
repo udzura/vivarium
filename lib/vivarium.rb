@@ -5,6 +5,7 @@ require "fileutils"
 require "optparse"
 require "pathname"
 require "rbbcc"
+require "socket"
 require_relative "vivarium/version"
 require_relative "vivarium/logger"
 
@@ -97,13 +98,13 @@ module Vivarium
     case family
     when 2 # AF_INET
       ipv4 = addr[0, 4].bytes.join(".")
-      "#{ipv4}:#{port}"
+      "#{ipv4}:#{port} (#{socket_const_name("AF_", family)})"
     when 10 # AF_INET6
       words = addr.unpack("n8")
       ipv6 = words.map { |w| format("%x", w) }.join(":")
-      "[#{ipv6}]:#{port}"
+      "[#{ipv6}]:#{port} (#{socket_const_name("AF_", family)})"
     else
-      "family=#{family} port=#{port}"
+      "family=#{family}(#{socket_const_name("AF_", family)}) port=#{port}"
     end
   end
 
@@ -114,7 +115,22 @@ module Vivarium
     family = bytes[0, 2].unpack1("S<")
     type = bytes[2, 2].unpack1("S<")
     protocol = bytes[4, 2].unpack1("S<")
-    "family=#{family} type=#{type} protocol=#{protocol}"
+    family_name = socket_const_name("AF_", family)
+    type_name = socket_const_name("SOCK_", type)
+    protocol_name = socket_const_name("IPPROTO_", protocol)
+    "family=#{family}(#{family_name}) type=#{type}(#{type_name}) protocol=#{protocol}(#{protocol_name})"
+  end
+
+  def self.socket_const_name(prefix, value)
+    return "UNKNOWN" unless defined?(Socket)
+
+    key = Socket.constants.find do |name|
+      name.to_s.start_with?(prefix) && Socket.const_get(name) == value
+    rescue NameError
+      false
+    end
+
+    key ? key.to_s : "UNKNOWN"
   end
 
   def self.decode_bad_socket_payload(raw_payload)
