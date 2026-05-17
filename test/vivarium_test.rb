@@ -10,9 +10,13 @@ class VivariumTest < Test::Unit::TestCase
   end
 
   test "event can be parsed from binary payload" do
-    binary = [1234].pack("L<") + "path_open".ljust(16, "\x00") + "/tmp/a.txt".ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
+    binary = [123_456_789].pack("Q<") + [1234].pack("L<") +
+             "path_open".ljust(16, "\x00") +
+             "/tmp/a.txt".ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
+    binary = binary.ljust(Vivarium::EVENT_STRUCT_SIZE, "\x00")
     event = Vivarium::Event.from_binary(binary)
 
+    assert_equal 123_456_789, event.ktime_ns
     assert_equal 1234, event.pid
     assert_equal "path_open", event.event_name.force_encoding("UTF-8")
     assert_equal "/tmp/a.txt", event.payload.force_encoding("UTF-8")

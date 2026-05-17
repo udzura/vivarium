@@ -21,7 +21,12 @@ module Vivarium
 
   EVENT_NAME_SIZE = 16
   EVENT_PAYLOAD_SIZE = 256
-  EVENT_STRUCT_SIZE = 4 + EVENT_NAME_SIZE + EVENT_PAYLOAD_SIZE
+  EVENT_TS_SIZE = 8
+  EVENT_STRUCT_SIZE = 288
+  EVENT_TS_OFFSET = 0
+  EVENT_PID_OFFSET = 8
+  EVENT_NAME_OFFSET = 12
+  EVENT_PAYLOAD_OFFSET = 28
   EVENT_CAPACITY = 1024
 
   @bpf_pin_dir = PIN_DIR
@@ -34,25 +39,26 @@ module Vivarium
     end
   end
 
-  Event = Struct.new(:pid, :event_name, :payload, keyword_init: true) do
+  Event = Struct.new(:ktime_ns, :pid, :event_name, :payload, keyword_init: true) do
     def empty?
-      pid.to_i.zero? && event_name.to_s.empty? && payload.to_s.empty?
+      ktime_ns.to_i.zero? && pid.to_i.zero? && event_name.to_s.empty? && payload.to_s.empty?
     end
 
     def self.from_binary(raw)
       bytes = raw.to_s.b
       bytes = bytes.ljust(EVENT_STRUCT_SIZE, "\x00")
 
-      pid = bytes[0, 4].unpack1("L<")
-      event_name = c_string(bytes[4, EVENT_NAME_SIZE])
-      raw_payload = bytes[4 + EVENT_NAME_SIZE, EVENT_PAYLOAD_SIZE]
+      ktime_ns = bytes[EVENT_TS_OFFSET, EVENT_TS_SIZE].unpack1("Q<")
+      pid = bytes[EVENT_PID_OFFSET, 4].unpack1("L<")
+      event_name = c_string(bytes[EVENT_NAME_OFFSET, EVENT_NAME_SIZE])
+      raw_payload = bytes[EVENT_PAYLOAD_OFFSET, EVENT_PAYLOAD_SIZE]
       payload = if %w[dns_req sock_connect odd_socket].include?(event_name)
                   raw_payload
                 else
                   c_string(raw_payload)
                 end
 
-      new(pid: pid, event_name: event_name, payload: payload)
+      new(ktime_ns: ktime_ns, pid: pid, event_name: event_name, payload: payload)
     end
 
     def self.c_string(bytes)
@@ -308,6 +314,7 @@ module Vivarium
       };
 
       struct event_t {
+        u64 ktime_ns;
         u32 pid;
         char event_name[16];
         char payload[#{EVENT_PAYLOAD_SIZE}];
@@ -341,6 +348,8 @@ module Vivarium
         if (!write_pos) {
           return;
         }
+
+        ev->ktime_ns = bpf_ktime_get_ns();
 
         u32 idx = *write_pos % #{EVENT_CAPACITY};
         __sync_fetch_and_add(write_pos, 1);
