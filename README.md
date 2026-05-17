@@ -18,10 +18,13 @@ The goal is to visualize which Ruby method context triggered low-level events.
 Implemented in this repository:
 
 - BPF LSM hook on `file_open`
+- BPF LSM hook on `socket_create` (flags unusual socket creation as `odd_socket`)
+- BPF LSM hook on `socket_connect` (captures destination family/address/port as `sock_connect`)
+- BPF kprobe on `ip_local_out` (captures UDP/53 DNS QNAME raw bytes as `dns_req`)
 - Shared pinned maps on bpffs
 	- `config_root_targets` (root PID -> 0/1)
 	- `config_spawned_targets` (spawned TID -> 0/1)
-	- `event_invoked` (array length 64 with `event_t` records)
+	- `event_invoked` (array length 1024 with `event_t` records)
 	- `event_write_pos` (cursor for appending into `event_invoked`)
 - Ruby API `Vivarium.observe do ... end`
 	- Registers current PID to `config_root_targets`
@@ -36,8 +39,8 @@ Implemented in this repository:
 ```c
 struct event_t {
 	u32 pid;
-	char event_name[8];   // "path_open"
-	char payload[64];     // opened path (truncated)
+	char event_name[16];
+	char payload[256];
 };
 ```
 
@@ -80,6 +83,14 @@ Vivarium.observe do
   File.read("/etc/passwd")
 end
 ```
+
+3) Network monitoring demo client:
+
+```bash
+bundle exec ruby examples/network_client_demo.rb
+```
+
+This demo intentionally triggers `sock_connect`, `dns_req`, and `odd_socket` events.
 
 You can also start top-level observation without a block (it keeps observing until process exit):
 
