@@ -44,6 +44,11 @@ module Vivarium
 
   def self.bpf_pin_dir: () -> String
   def self.bpf_pin_dir=: (String dir) -> String
+  def self.decode_dns_qname: (String raw_payload) -> String
+  def self.decode_sock_connect_payload: (String raw_payload) -> String
+  def self.decode_odd_socket_payload: (String raw_payload) -> String
+  def self.decode_bad_socket_payload: (String raw_payload) -> String
+  def self.render_event_payload: (Event event) -> String
   def self.observe: (?pin_dir: String pin_dir, ?logger: untyped logger, ?dest: untyped dest, ?format: Symbol format) { () -> untyped } -> untyped
   def self.top_observe: (?pin_dir: String pin_dir, ?logger: untyped logger, ?dest: untyped dest, ?format: Symbol format) -> ObservationSession
   def self.filter_internal_frames?: () -> bool

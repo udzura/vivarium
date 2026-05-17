@@ -21,7 +21,7 @@ module Vivarium
   EVENT_NAME_SIZE = 16
   EVENT_PAYLOAD_SIZE = 256
   EVENT_STRUCT_SIZE = 4 + EVENT_NAME_SIZE + EVENT_PAYLOAD_SIZE
-  EVENT_CAPACITY = 64
+  EVENT_CAPACITY = 1024
 
   @bpf_pin_dir = PIN_DIR
 
@@ -44,7 +44,12 @@ module Vivarium
 
       pid = bytes[0, 4].unpack1("L<")
       event_name = c_string(bytes[4, EVENT_NAME_SIZE])
-      payload = c_string(bytes[4 + EVENT_NAME_SIZE, EVENT_PAYLOAD_SIZE])
+      raw_payload = bytes[4 + EVENT_NAME_SIZE, EVENT_PAYLOAD_SIZE]
+      payload = if %w[dns_req sock_connect odd_socket].include?(event_name)
+                  raw_payload
+                else
+                  c_string(raw_payload)
+                end
 
       new(pid: pid, event_name: event_name, payload: payload)
     end
@@ -55,6 +60,80 @@ module Vivarium
       return str if nul.nil?
 
       str[0, nul]
+    end
+  end
+
+  def self.decode_dns_qname(raw_payload)
+    bytes = raw_payload.to_s.b.bytes
+    labels = []
+    idx = 0
+
+    while idx < bytes.length
+      length = bytes[idx]
+      break if length.nil? || length.zero?
+      break if length > 63
+
+      idx += 1
+      break if (idx + length) > bytes.length
+
+      label = bytes[idx, length].pack("C*")
+      labels << label
+      idx += length
+    end
+
+    return "" if labels.empty?
+
+    labels.join(".")
+  end
+
+  def self.decode_sock_connect_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < 20
+
+    family = bytes[0, 2].unpack1("S<")
+    port = bytes[2, 2].unpack1("n")
+    addr = bytes[4, 16]
+
+    case family
+    when 2 # AF_INET
+      ipv4 = addr[0, 4].bytes.join(".")
+      "#{ipv4}:#{port}"
+    when 10 # AF_INET6
+      words = addr.unpack("n8")
+      ipv6 = words.map { |w| format("%x", w) }.join(":")
+      "[#{ipv6}]:#{port}"
+    else
+      "family=#{family} port=#{port}"
+    end
+  end
+
+  def self.decode_odd_socket_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < 6
+
+    family = bytes[0, 2].unpack1("S<")
+    type = bytes[2, 2].unpack1("S<")
+    protocol = bytes[4, 2].unpack1("S<")
+    "family=#{family} type=#{type} protocol=#{protocol}"
+  end
+
+  def self.decode_bad_socket_payload(raw_payload)
+    decode_odd_socket_payload(raw_payload)
+  end
+
+  def self.render_event_payload(event)
+    case event.event_name
+    when "dns_req"
+      decoded = decode_dns_qname(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "sock_connect"
+      decoded = decode_sock_connect_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "odd_socket"
+      decoded = decode_odd_socket_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    else
+      event.payload.inspect
     end
   end
 
@@ -132,6 +211,23 @@ module Vivarium
 
   class Daemon
     BPF_PROGRAM_TEMPLATE = <<~CLANG
+      #include <linux/socket.h>
+      #include <uapi/linux/in.h>
+      #include <uapi/linux/in6.h>
+      #include <uapi/linux/ip.h>
+      #include <uapi/linux/udp.h>
+
+      #ifndef SOCK_STREAM
+      #define SOCK_STREAM 1
+      #endif
+      #ifndef SOCK_DGRAM
+      #define SOCK_DGRAM 2
+      #endif
+
+      struct net;
+      struct sock;
+      struct sk_buff;
+
       struct path {
         void *mnt;
         void *dentry;
@@ -139,6 +235,35 @@ module Vivarium
       struct file {
         char __off[__VIVARIUM_F_PATH_OFFSET__];
         struct path f_path;
+      };
+
+      struct sockaddr_t {
+        u16 sa_family;
+        unsigned char sa_data[14];
+      };
+
+      struct sockaddr_in_t {
+        u16 sin_family;
+        u16 sin_port;
+        u32 sin_addr;
+        unsigned char pad[8];
+      };
+
+      struct sockaddr_in6_t {
+        u16 sin6_family;
+        u16 sin6_port;
+        u32 sin6_flowinfo;
+        unsigned char sin6_addr[16];
+        u32 sin6_scope_id;
+      };
+
+      struct sk_buff_t {
+        unsigned char *head;
+        unsigned char *data;
+        u32 len;
+        u16 mac_header;
+        u16 network_header;
+        u16 transport_header;
       };
 
       struct event_t {
@@ -149,7 +274,7 @@ module Vivarium
 
       BPF_HASH(config_root_targets, u32, u8, 1024);
       BPF_HASH(config_spawned_targets, u32, u8, 8192);
-      BPF_ARRAY(event_invoked, struct event_t, 1024);
+      BPF_ARRAY(event_invoked, struct event_t, #{EVENT_CAPACITY});
       BPF_ARRAY(event_write_pos, u32, 1);
 
       static __always_inline int target_enabled(u32 pid, u32 tid)
@@ -165,6 +290,19 @@ module Vivarium
         }
 
         return 0;
+      }
+
+      static __always_inline void submit_event(struct event_t *ev)
+      {
+        u32 zero = 0;
+        u32 *write_pos = event_write_pos.lookup(&zero);
+        if (!write_pos) {
+          return;
+        }
+
+        u32 idx = *write_pos % #{EVENT_CAPACITY};
+        __sync_fetch_and_add(write_pos, 1);
+        event_invoked.update(&idx, ev);
       }
 
       TRACEPOINT_PROBE(sched, sched_process_fork)
@@ -204,14 +342,6 @@ module Vivarium
           return 0;
         }
 
-        u32 zero = 0;
-        u32 *write_pos = event_write_pos.lookup(&zero);
-        if (!write_pos) {
-          return 0;
-        }
-
-        u32 idx = *write_pos & 1023;
-        __sync_fetch_and_add(write_pos, 1);
         struct event_t ev = {};
         int path_ret;
         ev.pid = pid;
@@ -226,7 +356,121 @@ module Vivarium
         }
 
         bpf_trace_printk("vivarium: pid=%d path=%s\\n", pid, ev.payload);
-        event_invoked.update(&idx, &ev);
+        submit_event(&ev);
+
+        return 0;
+      }
+
+      LSM_PROBE(socket_create, int family, int type, int protocol, int kern)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        if ((family == AF_INET || family == AF_INET6) && (type == SOCK_STREAM || type == SOCK_DGRAM)) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        u16 family16 = family;
+        u16 type16 = type;
+        u16 proto16 = protocol;
+
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "odd_socket", 11);
+        __builtin_memcpy(&ev.payload[0], &family16, sizeof(family16));
+        __builtin_memcpy(&ev.payload[2], &type16, sizeof(type16));
+        __builtin_memcpy(&ev.payload[4], &proto16, sizeof(proto16));
+        submit_event(&ev);
+
+        return 0;
+      }
+
+      LSM_PROBE(socket_connect, struct socket *sock, struct sockaddr *address, int addrlen)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+        u16 family = 0;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        if (!address) {
+          return 0;
+        }
+
+        bpf_probe_read_kernel(&family, sizeof(family), address);
+
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "sock_connect", 13);
+        __builtin_memcpy(&ev.payload[0], &family, sizeof(family));
+
+        if (family == AF_INET) {
+          struct sockaddr_in_t sin = {};
+          bpf_probe_read_kernel(&sin, sizeof(sin), address);
+          __builtin_memcpy(&ev.payload[2], &sin.sin_port, sizeof(sin.sin_port));
+          __builtin_memcpy(&ev.payload[4], &sin.sin_addr, sizeof(sin.sin_addr));
+        } else if (family == AF_INET6) {
+          struct sockaddr_in6_t sin6 = {};
+          bpf_probe_read_kernel(&sin6, sizeof(sin6), address);
+          __builtin_memcpy(&ev.payload[2], &sin6.sin6_port, sizeof(sin6.sin6_port));
+          __builtin_memcpy(&ev.payload[4], &sin6.sin6_addr, sizeof(sin6.sin6_addr));
+        }
+
+        submit_event(&ev);
+
+        return 0;
+      }
+
+      int kprobe__ip_local_out(struct pt_regs *ctx, struct net *net, struct sock *sk, struct sk_buff *skb)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+        struct sk_buff_t skbv = {};
+        struct iphdr iph = {};
+        struct udphdr udph = {};
+        unsigned char *iph_ptr;
+        unsigned char *udph_ptr;
+        unsigned char *dns_ptr;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        if (!skb) {
+          return 0;
+        }
+
+        bpf_probe_read_kernel(&skbv, sizeof(skbv), skb);
+
+        iph_ptr = skbv.head + skbv.network_header;
+        udph_ptr = skbv.head + skbv.transport_header;
+
+        bpf_probe_read_kernel(&iph, sizeof(iph), iph_ptr);
+        if (iph.protocol != IPPROTO_UDP) {
+          return 0;
+        }
+
+        bpf_probe_read_kernel(&udph, sizeof(udph), udph_ptr);
+        if (udph.dest != __constant_htons(53)) {
+          return 0;
+        }
+
+        dns_ptr = udph_ptr + sizeof(struct udphdr) + 12;
+
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "dns_req", 8);
+        bpf_probe_read_kernel(&ev.payload[0], 64, dns_ptr);
+        submit_event(&ev);
 
         return 0;
       }

@@ -45,7 +45,7 @@ module Vivarium
       @io.puts "[vivarium] #{events.size} event(s) at #{tp.defined_class}##{tp.method_id} (#{tp.event})"
       @io.puts "  location: #{tp.path}:#{tp.lineno}"
       events.each do |event|
-        @io.puts "  pid=#{event.pid} #{event.event_name} payload=#{event.payload.inspect}"
+        @io.puts "  pid=#{event.pid} #{event.event_name} payload=#{Vivarium.render_event_payload(event)}"
       end
       @io.puts "  stack:"
       stack.each do |loc|
@@ -59,7 +59,7 @@ module Vivarium
         event:  tp.event.to_s,
         path:   tp.path,
         lineno: tp.lineno,
-        events: events.map { |e| { pid: e.pid, event_name: e.event_name, payload: e.payload } },
+        events: events.map { |e| { pid: e.pid, event_name: e.event_name, payload: Vivarium.render_event_payload(e) } },
         stack:  stack.map { |loc| "#{loc.path}:#{loc.lineno}:in #{loc.base_label}" }
       }
       @io.puts JSON.generate(entry)
