@@ -92,6 +92,14 @@ bundle exec ruby examples/network_client_demo.rb
 
 This demo intentionally triggers `sock_connect`, `dns_req`, and `odd_socket` events.
 
+4) File operation demo client (only touches `/tmp`):
+
+```bash
+bundle exec ruby examples/file_operation_demo.rb
+```
+
+This demo intentionally triggers `path_open`, `file_symlink`, `file_hardlink`, `file_rename`, `file_chmod`, and `file_getdents` events under `/tmp`.
+
 You can also start top-level observation without a block (it keeps observing until process exit):
 
 ```ruby

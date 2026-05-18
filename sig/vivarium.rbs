@@ -54,6 +54,11 @@ module Vivarium
   def self.decode_sock_connect_payload: (String raw_payload) -> String
   def self.decode_odd_socket_payload: (String raw_payload) -> String
   def self.decode_bad_socket_payload: (String raw_payload) -> String
+  def self.decode_file_symlink_payload: (String raw_payload) -> String
+  def self.decode_file_hardlink_payload: (String raw_payload) -> String
+  def self.decode_file_rename_payload: (String raw_payload) -> String
+  def self.decode_file_chmod_payload: (String raw_payload) -> String
+  def self.decode_file_getdents_payload: (String raw_payload) -> String
   def self.render_event_payload: (Event event) -> String
   def self.observe: (?pin_dir: String pin_dir, ?logger: untyped logger, ?dest: untyped dest, ?format: Symbol format) { () -> untyped } -> untyped
   def self.top_observe: (?pin_dir: String pin_dir, ?logger: untyped logger, ?dest: untyped dest, ?format: Symbol format) -> ObservationSession

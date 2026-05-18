@@ -52,7 +52,8 @@ module Vivarium
       pid = bytes[EVENT_PID_OFFSET, 4].unpack1("L<")
       event_name = c_string(bytes[EVENT_NAME_OFFSET, EVENT_NAME_SIZE])
       raw_payload = bytes[EVENT_PAYLOAD_OFFSET, EVENT_PAYLOAD_SIZE]
-      payload = if %w[dns_req sock_connect odd_socket].include?(event_name)
+      raw_payload_events = %w[dns_req sock_connect odd_socket file_symlink file_hardlink file_rename file_chmod file_getdents]
+      payload = if raw_payload_events.include?(event_name)
                   raw_payload
                 else
                   c_string(raw_payload)
@@ -68,6 +69,10 @@ module Vivarium
 
       str[0, nul]
     end
+  end
+
+  def self.c_string(bytes)
+    Event.c_string(bytes)
   end
 
   def self.decode_dns_qname(raw_payload)
@@ -143,6 +148,45 @@ module Vivarium
     decode_odd_socket_payload(raw_payload)
   end
 
+  def self.decode_file_symlink_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    target = c_string(bytes[0, 128])
+    link_name = c_string(bytes[128, 128])
+    "target=#{target.inspect} link_name=#{link_name.inspect}"
+  end
+
+  def self.decode_file_hardlink_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    old_path = c_string(bytes[0, 128])
+    new_name = c_string(bytes[128, 128])
+    "old_path=#{old_path.inspect} new_name=#{new_name.inspect}"
+  end
+
+  def self.decode_file_rename_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    old_name = c_string(bytes[0, 128])
+    new_name = c_string(bytes[128, 128])
+    "old_name=#{old_name.inspect} new_name=#{new_name.inspect}"
+  end
+
+  def self.decode_file_chmod_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < 2
+
+    mode = bytes[0, 2].unpack1("S<")
+    path = c_string(bytes[2, 254])
+    "mode=#{format('0o%o', mode)} path=#{path.inspect}"
+  end
+
+  def self.decode_file_getdents_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < 8
+
+    fd = bytes[0, 4].unpack1("L<")
+    count = bytes[4, 4].unpack1("L<")
+    "fd=#{fd} count=#{count}"
+  end
+
   def self.render_event_payload(event)
     case event.event_name
     when "dns_req"
@@ -153,6 +197,21 @@ module Vivarium
       decoded.empty? ? event.payload.inspect : decoded
     when "odd_socket"
       decoded = decode_odd_socket_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "file_symlink"
+      decoded = decode_file_symlink_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "file_hardlink"
+      decoded = decode_file_hardlink_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "file_rename"
+      decoded = decode_file_rename_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "file_chmod"
+      decoded = decode_file_chmod_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "file_getdents"
+      decoded = decode_file_getdents_payload(event.payload)
       decoded.empty? ? event.payload.inspect : decoded
     else
       event.payload.inspect
@@ -257,6 +316,24 @@ module Vivarium
       struct file {
         char __off[__VIVARIUM_F_PATH_OFFSET__];
         struct path f_path;
+      };
+
+      struct qstr {
+        union {
+          struct {
+            u64 hash_len;
+          };
+          struct {
+            u32 hash;
+            u32 len;
+          };
+        };
+        const unsigned char *name;
+      };
+
+      struct dentry_base {
+        char __pad[__VIVARIUM_DENTRY_D_NAME_OFFSET__];
+        struct qstr d_name;
       };
 
       struct sockaddr_t {
@@ -394,6 +471,29 @@ module Vivarium
         __builtin_memcpy(ev.event_name, "dns_req", 8);
         bpf_probe_read_user(&ev.payload[0], copy_len, payload + 12);
         submit_event(&ev);
+      }
+
+      static __always_inline int read_dentry_name(struct dentry *dentry, char *buffer, size_t max)
+      {
+        struct dentry_base d = {};
+        struct qstr qname = {};
+
+        if (!dentry || !buffer) {
+          return -1;
+        }
+
+        bpf_probe_read_kernel(&d, sizeof(d), (void *)dentry);
+        if (!d.d_name.name) {
+          return -1;
+        }
+
+        unsigned int len = d.d_name.len;
+        if (len > max) {
+          len = max;
+        }
+
+        bpf_probe_read_kernel_str(buffer, len + 1, (void *)d.d_name.name);
+        return len;
       }
 
       TRACEPOINT_PROBE(sched, sched_process_fork)
@@ -630,6 +730,133 @@ module Vivarium
 
         return 0;
       }
+
+      LSM_PROBE(inode_symlink, struct inode *dir, struct dentry *dentry, const char *oldname)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "file_symlink", 13);
+
+        if (oldname) {
+          bpf_probe_read_user_str(&ev.payload[0], 128, oldname);
+        }
+
+        if (dentry) {
+          read_dentry_name(dentry, &ev.payload[128], 128);
+        }
+
+        submit_event(&ev);
+        return 0;
+      }
+
+      LSM_PROBE(inode_link, struct dentry *old_dentry, struct inode *dir, struct dentry *new_dentry)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "file_hardlink", 14);
+
+        if (old_dentry) {
+          read_dentry_name(old_dentry, &ev.payload[0], 128);
+        }
+
+        if (new_dentry) {
+          read_dentry_name(new_dentry, &ev.payload[128], 128);
+        }
+
+        submit_event(&ev);
+        return 0;
+      }
+
+      LSM_PROBE(inode_rename, struct inode *old_dir, struct dentry *old_dentry, 
+                struct inode *new_dir, struct dentry *new_dentry, unsigned int flags)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "file_rename", 12);
+
+        if (old_dentry) {
+          read_dentry_name(old_dentry, &ev.payload[0], 128);
+        }
+
+        if (new_dentry) {
+          read_dentry_name(new_dentry, &ev.payload[128], 128);
+        }
+
+        submit_event(&ev);
+        return 0;
+      }
+
+      LSM_PROBE(path_chmod, struct path *path, umode_t mode)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        if (!path) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        u16 mode_short = mode & 0xFFFF;
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "file_chmod", 11);
+        __builtin_memcpy(&ev.payload[0], &mode_short, sizeof(mode_short));
+
+        bpf_d_path(path, &ev.payload[2], sizeof(ev.payload) - 2);
+        submit_event(&ev);
+        return 0;
+      }
+
+      TRACEPOINT_PROBE(syscalls, sys_enter_getdents64)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        u32 fd = args->fd;
+        u32 count = args->count;
+
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "file_getdents", 14);
+        __builtin_memcpy(&ev.payload[0], &fd, sizeof(fd));
+        __builtin_memcpy(&ev.payload[4], &count, sizeof(count));
+
+        submit_event(&ev);
+        return 0;
+      }
     CLANG
 
     def initialize(pin_dir: Vivarium.bpf_pin_dir)
@@ -641,7 +868,10 @@ module Vivarium
       FileUtils.mkdir_p(@pin_dir)
 
       f_path_offset = detect_f_path_offset
-      program = BPF_PROGRAM_TEMPLATE.gsub("__VIVARIUM_F_PATH_OFFSET__", f_path_offset.to_s)
+      d_name_offset = detect_dentry_d_name_offset
+      program = BPF_PROGRAM_TEMPLATE
+        .gsub("__VIVARIUM_F_PATH_OFFSET__", f_path_offset.to_s)
+        .gsub("__VIVARIUM_DENTRY_D_NAME_OFFSET__", d_name_offset.to_s)
 
       bpf = RbBCC::BCC.new(text: program)
       kprint_thread = start_kprint_logger(bpf)
@@ -776,6 +1006,56 @@ module Vivarium
       64
     rescue Errno::ENOENT
       raise Error, "bpftool is required to resolve struct file::f_path offset"
+    end
+
+    def detect_dentry_d_name_offset
+      env_offset = ENV["VIVARIUM_DENTRY_D_NAME_OFFSET"]
+      return Integer(env_offset, 10) if env_offset
+
+      raw = IO.popen(
+        %w[bpftool btf dump file /sys/kernel/btf/vmlinux format raw],
+        err: IO::NULL,
+        &:read
+      )
+
+      in_dentry_struct = false
+      d_name_bits_offset = nil
+
+      raw.each_line do |line|
+        if line =~ /^\[\d+\] STRUCT 'dentry' /
+          in_dentry_struct = true
+          next
+        end
+
+        if in_dentry_struct && line.start_with?("[")
+          break
+        end
+
+        next unless in_dentry_struct
+
+        if (match = line.match(/'d_name'.*bits_offset=(\d+)/))
+          d_name_bits_offset = Integer(match[1], 10)
+          break
+        end
+      end
+
+      if d_name_bits_offset
+        if (d_name_bits_offset % 8).positive?
+          raise Error, "unsupported d_name bits offset=#{d_name_bits_offset}"
+        end
+
+        if d_name_bits_offset >= 1024
+          warn "[vivariumd] suspicious d_name offset=#{d_name_bits_offset / 8}, fallback to offset=32"
+          return 32
+        end
+
+        return d_name_bits_offset / 8
+      end
+
+      warn "[vivariumd] could not find struct dentry::d_name in BTF, fallback to offset=32"
+      32
+    rescue Errno::ENOENT
+      raise Error, "bpftool is required to resolve struct dentry::d_name offset"
     end
   end
 
