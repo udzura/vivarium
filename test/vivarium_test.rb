@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "ostruct"
+require "stringio"
+require "json"
 
 class VivariumTest < Test::Unit::TestCase
   test "VERSION" do
@@ -68,6 +71,70 @@ class VivariumTest < Test::Unit::TestCase
     decoded = Vivarium.decode_task_kill_payload(payload)
     assert_match(/sig=9/, decoded)
     assert_match(/signame=KILL/, decoded)
+  end
+
+  test "decode setid_change payload" do
+    payload = [0x03].pack("L<").ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
+    decoded = Vivarium.decode_setid_change_payload(payload)
+    assert_match(/flags=0x3/, decoded)
+    assert_match(/LSM_SETID_ID/, decoded)
+    assert_match(/LSM_SETID_RE/, decoded)
+  end
+
+  test "decode capable_check payload" do
+    payload = [21, 0x10].pack("L<L<").ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
+    decoded = Vivarium.decode_capable_check_payload(payload)
+    assert_match(/cap=21\(CAP_SYS_ADMIN\)/, decoded)
+    assert_match(/opts=0x10/, decoded)
+  end
+
+  test "decode bprm_creds payload" do
+    payload = [1].pack("C") + "/usr/bin/sudo".ljust(Vivarium::EVENT_PAYLOAD_SIZE - 1, "\x00")
+    decoded = Vivarium.decode_bprm_creds_payload(payload)
+    assert_match(/has_file=1/, decoded)
+    assert_match(%r{file="/usr/bin/sudo"}, decoded)
+  end
+
+  test "event severity mapping" do
+    assert_equal "high", Vivarium.event_severity("setid_change")
+    assert_equal "high", Vivarium.event_severity("capable_check")
+    assert_equal "high", Vivarium.event_severity("bprm_creds")
+    assert_equal "high", Vivarium.event_severity("task_kill")
+    assert_equal "high", Vivarium.event_severity("ptrace_check")
+    assert_equal "high", Vivarium.event_severity("sb_mount")
+    assert_equal "high", Vivarium.event_severity("kernel_read_file")
+    assert_equal "medium", Vivarium.event_severity("proc_exec")
+    assert_equal "medium", Vivarium.event_severity("file_chmod")
+  end
+
+  test "event has severity metadata" do
+    event = Vivarium::Event.new(ktime_ns: 1, pid: 100, event_name: "task_kill", payload: "")
+    assert_equal "high", event.severity
+  end
+
+  test "logger human colors high severity in red" do
+    io = StringIO.new
+    logger = Vivarium::Logger.new(dest: io, format: :human)
+    tp = OpenStruct.new(defined_class: "Kernel", method_id: "system", event: "return", path: "demo.rb", lineno: 10)
+    event = Vivarium::Event.new(ktime_ns: 10, pid: 200, event_name: "task_kill", payload: [15].pack("l<").ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00"))
+
+    logger.log([event], tp, [])
+    out = io.string
+    assert_match(/severity=high/, out)
+    assert_match(/\e\[31m/, out)
+  end
+
+  test "logger json includes severity" do
+    io = StringIO.new
+    logger = Vivarium::Logger.new(dest: io, format: :json)
+    tp = OpenStruct.new(defined_class: "Kernel", method_id: "system", event: "return", path: "demo.rb", lineno: 10)
+    high_event = Vivarium::Event.new(ktime_ns: 1, pid: 1, event_name: "task_kill", payload: [9].pack("l<").ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00"))
+    medium_event = Vivarium::Event.new(ktime_ns: 2, pid: 2, event_name: "proc_exec", payload: "".ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00"))
+
+    logger.log([high_event, medium_event], tp, [])
+    parsed = JSON.parse(io.string)
+    assert_equal "high", parsed.fetch("events").first.fetch("severity")
+    assert_equal "medium", parsed.fetch("events").last.fetch("severity")
   end
 
   test "decode file_symlink payload" do

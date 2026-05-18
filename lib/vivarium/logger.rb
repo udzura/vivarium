@@ -5,6 +5,8 @@ require "json"
 module Vivarium
   class Logger
     FORMATS = %i[human json].freeze
+    ANSI_RED = "\e[31m"
+    ANSI_RESET = "\e[0m"
 
     # dest: IO object or file path string
     # format: :human or :json
@@ -45,7 +47,9 @@ module Vivarium
       @io.puts "[vivarium] #{events.size} event(s) at #{tp.defined_class}##{tp.method_id} (#{tp.event})"
       @io.puts "  location: #{tp.path}:#{tp.lineno}"
       events.each do |event|
-        @io.puts "  ktime_ns=#{event.ktime_ns} pid=#{event.pid} #{event.event_name} payload=#{Vivarium.render_event_payload(event)}"
+        severity = event.respond_to?(:severity) ? event.severity : Vivarium.event_severity(event.event_name)
+        line = "  ktime_ns=#{event.ktime_ns} pid=#{event.pid} severity=#{severity} #{event.event_name} payload=#{Vivarium.render_event_payload(event)}"
+        @io.puts(severity == "high" ? "#{ANSI_RED}#{line}#{ANSI_RESET}" : line)
       end
       @io.puts "  stack:"
       stack.each do |loc|
@@ -59,7 +63,15 @@ module Vivarium
         event:  tp.event.to_s,
         path:   tp.path,
         lineno: tp.lineno,
-        events: events.map { |e| { ktime_ns: e.ktime_ns, pid: e.pid, event_name: e.event_name, payload: Vivarium.render_event_payload(e) } },
+        events: events.map do |e|
+          {
+            ktime_ns: e.ktime_ns,
+            pid: e.pid,
+            severity: (e.respond_to?(:severity) ? e.severity : Vivarium.event_severity(e.event_name)),
+            event_name: e.event_name,
+            payload: Vivarium.render_event_payload(e)
+          }
+        end,
         stack:  stack.map { |loc| "#{loc.path}:#{loc.lineno}:in #{loc.base_label}" }
       }
       @io.puts JSON.generate(entry)
