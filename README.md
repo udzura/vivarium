@@ -20,6 +20,7 @@ Implemented in this repository:
 - BPF LSM hook on `file_open`
 - BPF LSM hooks on `inode_symlink`, `inode_link`, `inode_rename`, `path_chmod`
 - BPF tracepoint on `sys_enter_getdents64`
+- BPF tracepoint on `sys_enter_execve` (captures executable path and first few argv entries as `proc_exec`)
 - BPF LSM hook on `socket_create` (flags unusual socket creation as `odd_socket`)
 - BPF LSM hook on `socket_connect` (captures destination family/address/port as `sock_connect`)
 - BPF tracepoints on `sys_enter_sendmsg`, `sys_enter_sendto`, `sys_enter_sendmmsg` (capture UDP/53 DNS QNAME raw bytes as `dns_req`)
@@ -103,6 +104,14 @@ bundle exec ruby examples/file_operation_demo.rb
 
 This demo intentionally triggers `path_open`, `file_symlink`, `file_hardlink`, `file_rename`, `file_chmod`, and `file_getdents` events under `/tmp`.
 
+5) Execve demo client:
+
+```bash
+bundle exec ruby examples/execve_demo.rb
+```
+
+This demo intentionally triggers `proc_exec` with several argument patterns using direct `execve`-style process launches.
+
 You can also start top-level observation without a block (it keeps observing until process exit):
 
 ```ruby
@@ -148,6 +157,7 @@ bundle exec vivariumd --pin-dir /sys/fs/bpf/vivarium
 - Thread/Ractor-awareness is not yet implemented.
 - `event_invoked` uses fixed 1024 slots and wraps around when full.
 - `payload` is 256 bytes in `event_t`; some event types intentionally use smaller structured slices inside that buffer.
+- `proc_exec` currently stores the executable path plus up to 3 argv entries in 4 fixed 64-byte slots to keep the BPF verifier happy.
 - Current output format is textual and intended for iteration.
 - `vivariumd` resolves `struct file::f_path` offset from `/sys/kernel/btf/vmlinux` at startup.
 - `vivariumd` also resolves `struct dentry::d_name` offset from `/sys/kernel/btf/vmlinux` at startup.

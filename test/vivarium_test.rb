@@ -27,6 +27,17 @@ class VivariumTest < Test::Unit::TestCase
     assert_equal "google.com", Vivarium.decode_dns_qname(raw)
   end
 
+  test "decode proc_exec payload" do
+    payload = "/bin/sh".ljust(Vivarium::PROC_EXEC_SLOT_SIZE, "\x00") +
+              "sh".ljust(Vivarium::PROC_EXEC_SLOT_SIZE, "\x00") +
+              "-c".ljust(Vivarium::PROC_EXEC_SLOT_SIZE, "\x00") +
+              "echo hello".ljust(Vivarium::PROC_EXEC_SLOT_SIZE, "\x00")
+    decoded = Vivarium.decode_proc_exec_payload(payload)
+
+    assert_match(%r{filename="/bin/sh"}, decoded)
+    assert_match(%r{argv=\["sh", "-c", "echo hello"\]}, decoded)
+  end
+
   test "decode file_symlink payload" do
     target = "/path/to/target"
     link_name = "mylink"
@@ -80,6 +91,19 @@ class VivariumTest < Test::Unit::TestCase
     rendered = Vivarium.render_event_payload(event)
     assert_match(/target=/, rendered)
     assert_match(/link_name=/, rendered)
+  end
+
+  test "render event payload for proc_exec" do
+    payload = "/usr/bin/env".ljust(Vivarium::PROC_EXEC_SLOT_SIZE, "\x00") +
+              "env".ljust(Vivarium::PROC_EXEC_SLOT_SIZE, "\x00") +
+              "ruby".ljust(Vivarium::PROC_EXEC_SLOT_SIZE, "\x00") +
+              "script.rb".ljust(Vivarium::PROC_EXEC_SLOT_SIZE, "\x00")
+    event = Vivarium::Event.new(ktime_ns: 100, pid: 1234, event_name: "proc_exec", payload: payload)
+    rendered = Vivarium.render_event_payload(event)
+
+    assert_match(%r{filename="/usr/bin/env"}, rendered)
+    assert_match(%r{"ruby"}, rendered)
+    assert_match(%r{"script.rb"}, rendered)
   end
 
   test "observe without block is supported" do

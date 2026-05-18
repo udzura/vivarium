@@ -41,6 +41,8 @@ module Vivarium
   EVENT_NAME_SIZE: Integer
   EVENT_PAYLOAD_SIZE: Integer
   EVENT_TS_SIZE: Integer
+  PROC_EXEC_SLOT_SIZE: Integer
+  PROC_EXEC_SLOT_COUNT: Integer
   EVENT_STRUCT_SIZE: Integer
   EVENT_TS_OFFSET: Integer
   EVENT_PID_OFFSET: Integer
@@ -54,6 +56,7 @@ module Vivarium
   def self.decode_sock_connect_payload: (String raw_payload) -> String
   def self.decode_odd_socket_payload: (String raw_payload) -> String
   def self.decode_bad_socket_payload: (String raw_payload) -> String
+  def self.decode_proc_exec_payload: (String raw_payload) -> String
   def self.decode_file_symlink_payload: (String raw_payload) -> String
   def self.decode_file_hardlink_payload: (String raw_payload) -> String
   def self.decode_file_rename_payload: (String raw_payload) -> String
