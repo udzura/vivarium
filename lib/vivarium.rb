@@ -30,6 +30,48 @@ module Vivarium
   EVENT_NAME_OFFSET = 12
   EVENT_PAYLOAD_OFFSET = 28
   EVENT_CAPACITY = 1024
+  EVENT_SEVERITY_HIGH = %w[
+    capable_check bprm_creds setid_change task_kill
+    ptrace_check sb_mount kernel_read_file
+  ].freeze
+
+  CAPABILITY_NAMES = {
+    0 => "CAP_CHOWN",
+    1 => "CAP_DAC_OVERRIDE",
+    2 => "CAP_DAC_READ_SEARCH",
+    3 => "CAP_FOWNER",
+    4 => "CAP_FSETID",
+    5 => "CAP_KILL",
+    6 => "CAP_SETGID",
+    7 => "CAP_SETUID",
+    8 => "CAP_SETPCAP",
+    9 => "CAP_LINUX_IMMUTABLE",
+    10 => "CAP_NET_BIND_SERVICE",
+    12 => "CAP_NET_ADMIN",
+    13 => "CAP_NET_RAW",
+    16 => "CAP_SYS_MODULE",
+    17 => "CAP_SYS_RAWIO",
+    18 => "CAP_SYS_CHROOT",
+    19 => "CAP_SYS_PTRACE",
+    21 => "CAP_SYS_ADMIN",
+    22 => "CAP_SYS_BOOT",
+    23 => "CAP_SYS_NICE",
+    24 => "CAP_SYS_RESOURCE",
+    25 => "CAP_SYS_TIME",
+    27 => "CAP_MKNOD",
+    29 => "CAP_AUDIT_WRITE",
+    37 => "CAP_AUDIT_READ",
+    38 => "CAP_PERFMON",
+    39 => "CAP_BPF",
+    40 => "CAP_CHECKPOINT_RESTORE"
+  }.freeze
+
+  SETID_FLAG_NAMES = {
+    0x01 => "LSM_SETID_ID",
+    0x02 => "LSM_SETID_RE",
+    0x04 => "LSM_SETID_RES",
+    0x08 => "LSM_SETID_FS"
+  }.freeze
 
   @bpf_pin_dir = PIN_DIR
 
@@ -46,6 +88,10 @@ module Vivarium
       ktime_ns.to_i.zero? && pid.to_i.zero? && event_name.to_s.empty? && payload.to_s.empty?
     end
 
+    def severity
+      Vivarium.event_severity(event_name)
+    end
+
     def self.from_binary(raw)
       bytes = raw.to_s.b
       bytes = bytes.ljust(EVENT_STRUCT_SIZE, "\x00")
@@ -58,6 +104,7 @@ module Vivarium
         dns_req sock_connect odd_socket proc_exec
         file_symlink file_hardlink file_rename file_chmod file_getdents
         ptrace_check sb_mount kernel_read_file task_kill
+        setid_change capable_check bprm_creds
       ]
       payload = if raw_payload_events.include?(event_name)
                   raw_payload
@@ -79,6 +126,10 @@ module Vivarium
 
   def self.c_string(bytes)
     Event.c_string(bytes)
+  end
+
+  def self.event_severity(event_name)
+    EVENT_SEVERITY_HIGH.include?(event_name.to_s) ? "high" : "medium"
   end
 
   def self.decode_dns_qname(raw_payload)
@@ -248,6 +299,37 @@ module Vivarium
     signame ? "sig=#{sig} signame=#{signame}" : "sig=#{sig}"
   end
 
+  def self.decode_setid_change_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < 4
+
+    flags = bytes[0, 4].unpack1("L<")
+    names = SETID_FLAG_NAMES.each_with_object([]) do |(bit, name), acc|
+      acc << name if (flags & bit) != 0
+    end
+    names << "UNKNOWN" if names.empty?
+    "flags=0x#{flags.to_s(16)} kinds=[#{names.join(', ')}]"
+  end
+
+  def self.decode_capable_check_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < 8
+
+    cap = bytes[0, 4].unpack1("L<")
+    opts = bytes[4, 4].unpack1("L<")
+    cap_name = CAPABILITY_NAMES.fetch(cap, "UNKNOWN")
+    "cap=#{cap}(#{cap_name}) opts=0x#{opts.to_s(16)}"
+  end
+
+  def self.decode_bprm_creds_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < 2
+
+    has_file = bytes.getbyte(0).to_i
+    path = c_string(bytes[1, EVENT_PAYLOAD_SIZE - 1])
+    "has_file=#{has_file} file=#{path.inspect}"
+  end
+
   def self.render_event_payload(event)
     case event.event_name
     when "dns_req"
@@ -273,6 +355,15 @@ module Vivarium
       decoded.empty? ? event.payload.inspect : decoded
     when "task_kill"
       decoded = decode_task_kill_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "setid_change"
+      decoded = decode_setid_change_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "capable_check"
+      decoded = decode_capable_check_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "bprm_creds"
+      decoded = decode_bprm_creds_payload(event.payload)
       decoded.empty? ? event.payload.inspect : decoded
     when "file_symlink"
       decoded = decode_file_symlink_payload(event.payload)
@@ -387,6 +478,8 @@ module Vivarium
       struct task_struct;
       struct kernel_siginfo;
       struct cred;
+      struct user_namespace;
+      struct linux_binprm;
 
       struct path {
         void *mnt;
@@ -495,6 +588,29 @@ module Vivarium
         }
 
         return 0;
+      }
+
+      static __always_inline int monitored_capability(int cap)
+      {
+        switch (cap) {
+          case 1:  /* CAP_DAC_OVERRIDE */
+          case 2:  /* CAP_DAC_READ_SEARCH */
+          case 6:  /* CAP_SETGID */
+          case 7:  /* CAP_SETUID */
+          case 12: /* CAP_NET_ADMIN */
+          case 16: /* CAP_SYS_MODULE */
+          case 17: /* CAP_SYS_RAWIO */
+          case 19: /* CAP_SYS_PTRACE */
+          case 21: /* CAP_SYS_ADMIN */
+          case 22: /* CAP_SYS_BOOT */
+          case 25: /* CAP_SYS_TIME */
+          case 38: /* CAP_PERFMON */
+          case 39: /* CAP_BPF */
+          case 40: /* CAP_CHECKPOINT_RESTORE */
+            return 1;
+          default:
+            return 0;
+        }
       }
 
       static __always_inline void submit_event(struct event_t *ev)
@@ -940,6 +1056,81 @@ module Vivarium
         ev.pid = pid;
         __builtin_memcpy(ev.event_name, "task_kill", 10);
         __builtin_memcpy(&ev.payload[0], &sig, sizeof(sig));
+        submit_event(&ev);
+
+        return 0;
+      }
+
+      LSM_PROBE(task_fix_setuid, struct cred *new, const struct cred *old, int flags)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        u32 flags32 = flags;
+
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "setid_change", 13);
+        __builtin_memcpy(&ev.payload[0], &flags32, sizeof(flags32));
+        submit_event(&ev);
+
+        return 0;
+      }
+
+      LSM_PROBE(capable, const struct cred *cred, struct user_namespace *targ_ns, int cap, unsigned int opts)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        if (!monitored_capability(cap)) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        u32 cap32 = cap;
+        u32 opts32 = opts;
+
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "capable_check", 14);
+        __builtin_memcpy(&ev.payload[0], &cap32, sizeof(cap32));
+        __builtin_memcpy(&ev.payload[4], &opts32, sizeof(opts32));
+        submit_event(&ev);
+
+        return 0;
+      }
+
+      LSM_PROBE(bprm_creds_from_file, struct linux_binprm *bprm, struct file *file)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        u8 has_file = 0;
+
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "bprm_creds", 11);
+
+        if (file) {
+          has_file = 1;
+          bpf_d_path(&file->f_path, &ev.payload[1], sizeof(ev.payload) - 1);
+        }
+
+        __builtin_memcpy(&ev.payload[0], &has_file, sizeof(has_file));
         submit_event(&ev);
 
         return 0;

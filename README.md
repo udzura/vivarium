@@ -26,6 +26,9 @@ Implemented in this repository:
 	- `sb_mount` (emits `sb_mount`)
 	- `kernel_read_file` (emits `kernel_read_file`)
 	- `task_kill` (emits `task_kill`)
+	- `task_fix_setuid` (emits `setid_change`)
+	- `capable` for high-risk capabilities only (emits `capable_check`)
+	- `bprm_creds_from_file` (emits `bprm_creds`)
 - BPF LSM hook on `socket_create` (flags unusual socket creation as `odd_socket`)
 - BPF LSM hook on `socket_connect` (captures destination family/address/port as `sock_connect`)
 - BPF tracepoints on `sys_enter_sendmsg`, `sys_enter_sendto`, `sys_enter_sendmmsg` (capture UDP/53 DNS QNAME raw bytes as `dns_req`)
@@ -125,6 +128,14 @@ bundle exec ruby examples/signal_kill_demo.rb
 
 This demo forks a child process and sends `TERM` with `Process.kill`, which is useful for triggering `task_kill`.
 
+7) Privilege-related event demo client:
+
+```bash
+bundle exec ruby examples/privilege_event_demo.rb
+```
+
+This demo attempts setuid/setgid changes, sensitive file access, and `sudo` exec to trigger privilege-related events such as `setid_change`, `capable_check`, and `bprm_creds`.
+
 You can also start top-level observation without a block (it keeps observing until process exit):
 
 ```ruby
@@ -171,6 +182,9 @@ bundle exec vivariumd --pin-dir /sys/fs/bpf/vivarium
 - `event_invoked` uses fixed 1024 slots and wraps around when full.
 - `payload` is 256 bytes in `event_t`; some event types intentionally use smaller structured slices inside that buffer.
 - `proc_exec` currently stores the executable path plus up to 3 argv entries in 4 fixed 64-byte slots to keep the BPF verifier happy.
+- Each event is tagged with severity metadata: `high` for `setid_change`, `capable_check`, `bprm_creds`, `task_kill`, `ptrace_check`, `sb_mount`, and `kernel_read_file`; others are `medium` by default.
+- In `human` format output, `high` severity events are rendered in red.
+- `capable_check` is intentionally filtered to high-risk capabilities to reduce noise from extremely frequent `capable` hook calls.
 - Current output format is textual and intended for iteration.
 - `vivariumd` resolves `struct file::f_path` offset from `/sys/kernel/btf/vmlinux` at startup.
 - `vivariumd` also resolves `struct dentry::d_name` offset from `/sys/kernel/btf/vmlinux` at startup.

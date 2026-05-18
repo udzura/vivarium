@@ -11,6 +11,7 @@ module Vivarium
     attr_accessor payload: String?
 
     def empty?: bool
+    def severity: () -> String
     def self.from_binary: (String raw) -> Event
   end
 
@@ -52,6 +53,7 @@ module Vivarium
 
   def self.bpf_pin_dir: () -> String
   def self.bpf_pin_dir=: (String dir) -> String
+  def self.event_severity: (String event_name) -> String
   def self.decode_dns_qname: (String raw_payload) -> String
   def self.decode_sock_connect_payload: (String raw_payload) -> String
   def self.decode_odd_socket_payload: (String raw_payload) -> String
@@ -61,6 +63,9 @@ module Vivarium
   def self.decode_sb_mount_payload: (String raw_payload) -> String
   def self.decode_kernel_read_file_payload: (String raw_payload) -> String
   def self.decode_task_kill_payload: (String raw_payload) -> String
+  def self.decode_setid_change_payload: (String raw_payload) -> String
+  def self.decode_capable_check_payload: (String raw_payload) -> String
+  def self.decode_bprm_creds_payload: (String raw_payload) -> String
   def self.decode_file_symlink_payload: (String raw_payload) -> String
   def self.decode_file_hardlink_payload: (String raw_payload) -> String
   def self.decode_file_rename_payload: (String raw_payload) -> String
