@@ -38,6 +38,38 @@ class VivariumTest < Test::Unit::TestCase
     assert_match(%r{argv=\["sh", "-c", "echo hello"\]}, decoded)
   end
 
+  test "decode ptrace_check payload" do
+    payload = [0x42].pack("L<").ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
+    decoded = Vivarium.decode_ptrace_check_payload(payload)
+    assert_match(/mode=0x42/, decoded)
+  end
+
+  test "decode sb_mount payload" do
+    payload = [0x1234].pack("Q<") +
+              "/dev/loop0".ljust(120, "\x00") +
+              "ext4".ljust(120, "\x00")
+    payload = payload.ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
+    decoded = Vivarium.decode_sb_mount_payload(payload)
+
+    assert_match(/flags=0x1234/, decoded)
+    assert_match(%r{dev_name="/dev/loop0"}, decoded)
+    assert_match(%r{fs_type="ext4"}, decoded)
+  end
+
+  test "decode kernel_read_file payload" do
+    payload = [3, 1].pack("L<L<").ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
+    decoded = Vivarium.decode_kernel_read_file_payload(payload)
+    assert_match(/id=3/, decoded)
+    assert_match(/contents=1/, decoded)
+  end
+
+  test "decode task_kill payload" do
+    payload = [9].pack("l<").ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
+    decoded = Vivarium.decode_task_kill_payload(payload)
+    assert_match(/sig=9/, decoded)
+    assert_match(/signame=KILL/, decoded)
+  end
+
   test "decode file_symlink payload" do
     target = "/path/to/target"
     link_name = "mylink"
@@ -104,6 +136,13 @@ class VivariumTest < Test::Unit::TestCase
     assert_match(%r{filename="/usr/bin/env"}, rendered)
     assert_match(%r{"ruby"}, rendered)
     assert_match(%r{"script.rb"}, rendered)
+  end
+
+  test "render event payload for ptrace_check" do
+    payload = [0x2].pack("L<").ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
+    event = Vivarium::Event.new(ktime_ns: 100, pid: 1234, event_name: "ptrace_check", payload: payload)
+    rendered = Vivarium.render_event_payload(event)
+    assert_match(/mode=0x2/, rendered)
   end
 
   test "observe without block is supported" do

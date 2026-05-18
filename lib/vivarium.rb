@@ -54,7 +54,11 @@ module Vivarium
       pid = bytes[EVENT_PID_OFFSET, 4].unpack1("L<")
       event_name = c_string(bytes[EVENT_NAME_OFFSET, EVENT_NAME_SIZE])
       raw_payload = bytes[EVENT_PAYLOAD_OFFSET, EVENT_PAYLOAD_SIZE]
-      raw_payload_events = %w[dns_req sock_connect odd_socket proc_exec file_symlink file_hardlink file_rename file_chmod file_getdents]
+      raw_payload_events = %w[
+        dns_req sock_connect odd_socket proc_exec
+        file_symlink file_hardlink file_rename file_chmod file_getdents
+        ptrace_check sb_mount kernel_read_file task_kill
+      ]
       payload = if raw_payload_events.include?(event_name)
                   raw_payload
                 else
@@ -203,6 +207,47 @@ module Vivarium
     "filename=#{filename.inspect} argv=[#{argv.map(&:inspect).join(', ')}]"
   end
 
+  def self.decode_ptrace_check_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < 4
+
+    mode = bytes[0, 4].unpack1("L<")
+    "mode=0x#{mode.to_s(16)}"
+  end
+
+  def self.decode_sb_mount_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < 248
+
+    flags = bytes[0, 8].unpack1("Q<")
+    dev_name = c_string(bytes[8, 120])
+    fs_type = c_string(bytes[128, 120])
+    "flags=0x#{flags.to_s(16)} dev_name=#{dev_name.inspect} fs_type=#{fs_type.inspect}"
+  end
+
+  def self.decode_kernel_read_file_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < 8
+
+    id = bytes[0, 4].unpack1("L<")
+    contents = bytes[4, 4].unpack1("L<")
+    "id=#{id} contents=#{contents}"
+  end
+
+  def self.decode_task_kill_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < 4
+
+    sig = bytes[0, 4].unpack1("l<")
+    signame = begin
+      Signal.signame(sig)
+    rescue ArgumentError
+      nil
+    end
+
+    signame ? "sig=#{sig} signame=#{signame}" : "sig=#{sig}"
+  end
+
   def self.render_event_payload(event)
     case event.event_name
     when "dns_req"
@@ -216,6 +261,18 @@ module Vivarium
       decoded.empty? ? event.payload.inspect : decoded
     when "proc_exec"
       decoded = decode_proc_exec_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "ptrace_check"
+      decoded = decode_ptrace_check_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "sb_mount"
+      decoded = decode_sb_mount_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "kernel_read_file"
+      decoded = decode_kernel_read_file_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "task_kill"
+      decoded = decode_task_kill_payload(event.payload)
       decoded.empty? ? event.payload.inspect : decoded
     when "file_symlink"
       decoded = decode_file_symlink_payload(event.payload)
@@ -327,6 +384,9 @@ module Vivarium
       struct net;
       struct sock;
       struct sk_buff;
+      struct task_struct;
+      struct kernel_siginfo;
+      struct cred;
 
       struct path {
         void *mnt;
@@ -789,6 +849,99 @@ module Vivarium
         }
 
         submit_event(&ev);
+        return 0;
+      }
+
+      LSM_PROBE(ptrace_access_check, struct task_struct *child, unsigned int mode)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        u32 mode32 = mode;
+
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "ptrace_check", 13);
+        __builtin_memcpy(&ev.payload[0], &mode32, sizeof(mode32));
+        submit_event(&ev);
+
+        return 0;
+      }
+
+      LSM_PROBE(sb_mount, const char *dev_name, const struct path *path, const char *type, unsigned long flags, void *data)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        u64 flags64 = flags;
+
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "sb_mount", 9);
+        __builtin_memcpy(&ev.payload[0], &flags64, sizeof(flags64));
+
+        if (dev_name) {
+          bpf_probe_read_kernel_str(&ev.payload[8], 120, dev_name);
+        }
+        if (type) {
+          bpf_probe_read_kernel_str(&ev.payload[128], 120, type);
+        }
+
+        submit_event(&ev);
+
+        return 0;
+      }
+
+      LSM_PROBE(kernel_read_file, struct file *file, int id, int contents)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        u32 id32 = id;
+        u32 contents32 = contents;
+
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "kernel_read_file", 16);
+        __builtin_memcpy(&ev.payload[0], &id32, sizeof(id32));
+        __builtin_memcpy(&ev.payload[4], &contents32, sizeof(contents32));
+        submit_event(&ev);
+
+        return 0;
+      }
+
+      LSM_PROBE(task_kill, struct task_struct *p, struct kernel_siginfo *info, int sig, const struct cred *cred)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "task_kill", 10);
+        __builtin_memcpy(&ev.payload[0], &sig, sizeof(sig));
+        submit_event(&ev);
+
         return 0;
       }
 

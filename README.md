@@ -21,6 +21,11 @@ Implemented in this repository:
 - BPF LSM hooks on `inode_symlink`, `inode_link`, `inode_rename`, `path_chmod`
 - BPF tracepoint on `sys_enter_getdents64`
 - BPF tracepoint on `sys_enter_execve` (captures executable path and first few argv entries as `proc_exec`)
+- BPF LSM hooks for suspicious behavior checks:
+	- `ptrace_access_check` (emits `ptrace_check`)
+	- `sb_mount` (emits `sb_mount`)
+	- `kernel_read_file` (emits `kernel_read_file`)
+	- `task_kill` (emits `task_kill`)
 - BPF LSM hook on `socket_create` (flags unusual socket creation as `odd_socket`)
 - BPF LSM hook on `socket_connect` (captures destination family/address/port as `sock_connect`)
 - BPF tracepoints on `sys_enter_sendmsg`, `sys_enter_sendto`, `sys_enter_sendmmsg` (capture UDP/53 DNS QNAME raw bytes as `dns_req`)
@@ -111,6 +116,14 @@ bundle exec ruby examples/execve_demo.rb
 ```
 
 This demo intentionally triggers `proc_exec` with several argument patterns using direct `execve`-style process launches.
+
+6) Signal demo client:
+
+```bash
+bundle exec ruby examples/signal_kill_demo.rb
+```
+
+This demo forks a child process and sends `TERM` with `Process.kill`, which is useful for triggering `task_kill`.
 
 You can also start top-level observation without a block (it keeps observing until process exit):
 
