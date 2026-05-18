@@ -18,9 +18,11 @@ The goal is to visualize which Ruby method context triggered low-level events.
 Implemented in this repository:
 
 - BPF LSM hook on `file_open`
+- BPF LSM hooks on `inode_symlink`, `inode_link`, `inode_rename`, `path_chmod`
+- BPF tracepoint on `sys_enter_getdents64`
 - BPF LSM hook on `socket_create` (flags unusual socket creation as `odd_socket`)
 - BPF LSM hook on `socket_connect` (captures destination family/address/port as `sock_connect`)
-- BPF kprobe on `ip_local_out` (captures UDP/53 DNS QNAME raw bytes as `dns_req`)
+- BPF tracepoints on `sys_enter_sendmsg`, `sys_enter_sendto`, `sys_enter_sendmmsg` (capture UDP/53 DNS QNAME raw bytes as `dns_req`)
 - Shared pinned maps on bpffs
 	- `config_root_targets` (root PID -> 0/1)
 	- `config_spawned_targets` (spawned TID -> 0/1)
@@ -38,6 +40,7 @@ Implemented in this repository:
 
 ```c
 struct event_t {
+	u64 ktime_ns;
 	u32 pid;
 	char event_name[16];
 	char payload[256];
@@ -48,7 +51,7 @@ struct event_t {
 
 - Linux kernel/environment supporting BPF LSM
 - `libbcc` installed
-- `bpftool` installed (used to resolve `struct file::f_path` offset from BTF)
+- `bpftool` installed (used to resolve `struct file::f_path` and `struct dentry::d_name` offsets from BTF)
 - root privileges for `vivariumd`
 - bpffs mounted (typically `/sys/fs/bpf`)
 
@@ -91,6 +94,14 @@ bundle exec ruby examples/network_client_demo.rb
 ```
 
 This demo intentionally triggers `sock_connect`, `dns_req`, and `odd_socket` events.
+
+4) File operation demo client (only touches `/tmp`):
+
+```bash
+bundle exec ruby examples/file_operation_demo.rb
+```
+
+This demo intentionally triggers `path_open`, `file_symlink`, `file_hardlink`, `file_rename`, `file_chmod`, and `file_getdents` events under `/tmp`.
 
 You can also start top-level observation without a block (it keeps observing until process exit):
 
@@ -135,11 +146,12 @@ bundle exec vivariumd --pin-dir /sys/fs/bpf/vivarium
 ## Notes
 
 - Thread/Ractor-awareness is not yet implemented.
-- `event_invoked` uses fixed 64 slots and wraps around when full.
-- Payload is truncated to 64 bytes in kernel space.
+- `event_invoked` uses fixed 1024 slots and wraps around when full.
+- `payload` is 256 bytes in `event_t`; some event types intentionally use smaller structured slices inside that buffer.
 - Current output format is textual and intended for iteration.
 - `vivariumd` resolves `struct file::f_path` offset from `/sys/kernel/btf/vmlinux` at startup.
-- You can override offset manually with `VIVARIUM_FILE_F_PATH_OFFSET` if auto-detection fails.
+- `vivariumd` also resolves `struct dentry::d_name` offset from `/sys/kernel/btf/vmlinux` at startup.
+- You can override offsets manually with `VIVARIUM_FILE_F_PATH_OFFSET` and `VIVARIUM_DENTRY_D_NAME_OFFSET` if auto-detection fails.
 - `vivariumd` also prints `bpf_trace_printk` lines (`vivarium: pid=... path=...`) to its own logs.
 
 ## Contributing

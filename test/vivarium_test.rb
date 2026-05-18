@@ -27,6 +27,61 @@ class VivariumTest < Test::Unit::TestCase
     assert_equal "google.com", Vivarium.decode_dns_qname(raw)
   end
 
+  test "decode file_symlink payload" do
+    target = "/path/to/target"
+    link_name = "mylink"
+    payload = target.ljust(128, "\x00") + link_name.ljust(128, "\x00")
+    decoded = Vivarium.decode_file_symlink_payload(payload)
+    assert_match(/target=.*#{Regexp.escape(target)}/, decoded)
+    assert_match(/link_name=.*#{Regexp.escape(link_name)}/, decoded)
+  end
+
+  test "decode file_hardlink payload" do
+    old_path = "/path/to/file.txt"
+    new_name = "hardlink"
+    payload = old_path.ljust(128, "\x00") + new_name.ljust(128, "\x00")
+    decoded = Vivarium.decode_file_hardlink_payload(payload)
+    assert_match(/old_path=.*#{Regexp.escape(old_path)}/, decoded)
+    assert_match(/new_name=.*#{Regexp.escape(new_name)}/, decoded)
+  end
+
+  test "decode file_rename payload" do
+    old_name = "oldname.txt"
+    new_name = "newname.txt"
+    payload = old_name.ljust(128, "\x00") + new_name.ljust(128, "\x00")
+    decoded = Vivarium.decode_file_rename_payload(payload)
+    assert_match(/old_name=.*#{Regexp.escape(old_name)}/, decoded)
+    assert_match(/new_name=.*#{Regexp.escape(new_name)}/, decoded)
+  end
+
+  test "decode file_chmod payload" do
+    mode = 0o644
+    path = "/etc/passwd"
+    payload = [mode].pack("S<") + path.ljust(254, "\x00")
+    decoded = Vivarium.decode_file_chmod_payload(payload)
+    assert_match(/mode=0o644/, decoded)
+    assert_match(/path=.*#{Regexp.escape(path)}/, decoded)
+  end
+
+  test "decode file_getdents payload" do
+    fd = 3
+    count = 4096
+    payload = [fd, count].pack("L<L<") + "\x00" * (Vivarium::EVENT_PAYLOAD_SIZE - 8)
+    decoded = Vivarium.decode_file_getdents_payload(payload)
+    assert_match(/fd=3/, decoded)
+    assert_match(/count=4096/, decoded)
+  end
+
+  test "render event payload for file_symlink" do
+    target = "link_target"
+    link_name = "symlink_name"
+    payload = target.ljust(128, "\x00") + link_name.ljust(128, "\x00")
+    event = Vivarium::Event.new(ktime_ns: 100, pid: 1234, event_name: "file_symlink", payload: payload)
+    rendered = Vivarium.render_event_payload(event)
+    assert_match(/target=/, rendered)
+    assert_match(/link_name=/, rendered)
+  end
+
   test "observe without block is supported" do
     err = assert_raise(Vivarium::Error) do
       Vivarium.observe(pin_dir: "/tmp/vivarium-not-found")
