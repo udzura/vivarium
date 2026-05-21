@@ -15,6 +15,7 @@ module Vivarium
         opts.separator "Options:"
         opts.on("--pin-dir PATH", "Pinned map directory") { |v| options[:pin_dir] = v }
         opts.on("--format FORMAT", "Output format (human/json)") { |v| options[:format] = v.to_sym }
+        opts.on("-o", "--output PATH", "Log output file (default: stdout)") { |v| options[:dest] = File.open(v, "a") }
       end
       parser.order!(argv)
 
