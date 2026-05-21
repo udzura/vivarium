@@ -15,7 +15,8 @@ class VivariumTest < Test::Unit::TestCase
   test "event can be parsed from binary payload" do
     binary = [123_456_789].pack("Q<") + [1234].pack("L<") +
              "path_open".ljust(16, "\x00") +
-             "/tmp/a.txt".ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
+             "/tmp/a.txt".ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00") +
+             [42].pack("L<")
     binary = binary.ljust(Vivarium::EVENT_STRUCT_SIZE, "\x00")
     event = Vivarium::Event.from_binary(binary)
 
@@ -23,6 +24,7 @@ class VivariumTest < Test::Unit::TestCase
     assert_equal 1234, event.pid
     assert_equal "path_open", event.event_name.force_encoding("UTF-8")
     assert_equal "/tmp/a.txt", event.payload.force_encoding("UTF-8")
+    assert_equal 42, event.method_id
   end
 
   test "decode dns qname" do
@@ -115,10 +117,10 @@ class VivariumTest < Test::Unit::TestCase
   test "logger human colors high severity in red" do
     io = StringIO.new
     logger = Vivarium::Logger.new(dest: io, format: :human)
-    tp = OpenStruct.new(defined_class: "Kernel", method_id: "system", event: "return", path: "demo.rb", lineno: 10)
+    ctx = Vivarium::MethodContext.new(defined_class: "Kernel", method_id: "system", event: :return, path: "demo.rb", lineno: 10)
     event = Vivarium::Event.new(ktime_ns: 10, pid: 200, event_name: "task_kill", payload: [15].pack("l<").ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00"))
 
-    logger.log([event], tp, [])
+    logger.log([event], ctx, [])
     out = io.string
     assert_match(/severity=high/, out)
     assert_match(/\e\[31m/, out)
@@ -127,11 +129,11 @@ class VivariumTest < Test::Unit::TestCase
   test "logger json includes severity" do
     io = StringIO.new
     logger = Vivarium::Logger.new(dest: io, format: :json)
-    tp = OpenStruct.new(defined_class: "Kernel", method_id: "system", event: "return", path: "demo.rb", lineno: 10)
+    ctx = Vivarium::MethodContext.new(defined_class: "Kernel", method_id: "system", event: :return, path: "demo.rb", lineno: 10)
     high_event = Vivarium::Event.new(ktime_ns: 1, pid: 1, event_name: "task_kill", payload: [9].pack("l<").ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00"))
     medium_event = Vivarium::Event.new(ktime_ns: 2, pid: 2, event_name: "proc_exec", payload: "".ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00"))
 
-    logger.log([high_event, medium_event], tp, [])
+    logger.log([high_event, medium_event], ctx, [])
     parsed = JSON.parse(io.string)
     assert_equal "high", parsed.fetch("events").first.fetch("severity")
     assert_equal "medium", parsed.fetch("events").last.fetch("severity")
@@ -212,13 +214,6 @@ class VivariumTest < Test::Unit::TestCase
     assert_match(/mode=0x2/, rendered)
   end
 
-  test "observe without block is supported" do
-    err = assert_raise(Vivarium::Error) do
-      Vivarium.observe(pin_dir: "/tmp/vivarium-not-found")
-    end
-    assert_match(/failed to open pinned maps/, err.message)
-  end
-
   test "top_observe exists" do
     assert_respond_to Vivarium, :top_observe
   end
@@ -228,5 +223,26 @@ class VivariumTest < Test::Unit::TestCase
       Vivarium::MapStore.new(pin_dir: "/tmp/vivarium-not-found")
     end
     assert_match(/failed to open pinned maps/, err.message)
+  end
+
+  test "event receiver raises when socket is missing" do
+    assert_raise(Errno::ENOENT) do
+      Vivarium::EventReceiver.new(socket_path: "/tmp/vivarium-not-found.sock")
+    end
+  end
+
+  test "method context has expected accessors" do
+    ctx = Vivarium::MethodContext.new(
+      defined_class: "MyClass",
+      method_id: :my_method,
+      event: :return,
+      path: "test.rb",
+      lineno: 42
+    )
+    assert_equal "MyClass", ctx.defined_class
+    assert_equal :my_method, ctx.method_id
+    assert_equal :return, ctx.event
+    assert_equal "test.rb", ctx.path
+    assert_equal 42, ctx.lineno
   end
 end

@@ -14,11 +14,10 @@ module Vivarium
   class Error < StandardError; end
 
   PIN_DIR = ENV.fetch("VIVARIUM_BPF_PIN_DIR", "/sys/fs/bpf/vivarium")
+  SOCKET_PATH = ENV.fetch("VIVARIUM_SOCKET_PATH", "/run/vivarium/vivarium.sock")
   CONFIG_ROOT_TARGETS_PIN = File.join(PIN_DIR, "config_root_targets")
   CONFIG_SPAWNED_TARGETS_PIN = File.join(PIN_DIR, "config_spawned_targets")
   CONFIG_TARGETS_PIN = CONFIG_ROOT_TARGETS_PIN
-  EVENT_INVOKED_PIN = File.join(PIN_DIR, "event_invoked")
-  EVENT_WRITE_POS_PIN = File.join(PIN_DIR, "event_write_pos")
 
   EVENT_NAME_SIZE = 16
   EVENT_PAYLOAD_SIZE = 256
@@ -30,7 +29,7 @@ module Vivarium
   EVENT_PID_OFFSET = 8
   EVENT_NAME_OFFSET = 12
   EVENT_PAYLOAD_OFFSET = 28
-  EVENT_CAPACITY = 1024
+  EVENT_METHOD_ID_OFFSET = 284
   EVENT_SEVERITY_HIGH = %w[
     capable_check bprm_creds setid_change task_kill
     ptrace_check sb_mount kernel_read_file
@@ -75,16 +74,21 @@ module Vivarium
   }.freeze
 
   @bpf_pin_dir = PIN_DIR
+  @socket_path = SOCKET_PATH
 
   class << self
-    attr_writer :bpf_pin_dir
+    attr_writer :bpf_pin_dir, :socket_path
 
     def bpf_pin_dir
       @bpf_pin_dir || PIN_DIR
     end
+
+    def socket_path
+      @socket_path || SOCKET_PATH
+    end
   end
 
-  Event = Struct.new(:ktime_ns, :pid, :event_name, :payload, keyword_init: true) do
+  Event = Struct.new(:ktime_ns, :pid, :event_name, :payload, :method_id, keyword_init: true) do
     def empty?
       ktime_ns.to_i.zero? && pid.to_i.zero? && event_name.to_s.empty? && payload.to_s.empty?
     end
@@ -113,7 +117,9 @@ module Vivarium
                   c_string(raw_payload)
                 end
 
-      new(ktime_ns: ktime_ns, pid: pid, event_name: event_name, payload: payload)
+      method_id = bytes[EVENT_METHOD_ID_OFFSET, 4].unpack1("L<")
+
+      new(ktime_ns: ktime_ns, pid: pid, event_name: event_name, payload: payload, method_id: method_id)
     end
 
     def self.c_string(bytes)
@@ -403,15 +409,8 @@ module Vivarium
         keysize: 4,
         leafsize: 1
       )
-      @event_invoked = RbBCC::ArrayTable.from_pin(
-        File.join(@pin_dir, "event_invoked"),
-        "unsigned int",
-        "char[#{EVENT_STRUCT_SIZE}]",
-        keysize: 4,
-        leafsize: EVENT_STRUCT_SIZE
-      )
-      @event_write_pos = RbBCC::ArrayTable.from_pin(
-        File.join(@pin_dir, "event_write_pos"),
+      @current_method_id = RbBCC::HashTable.from_pin(
+        File.join(@pin_dir, "current_method_id"),
         "unsigned int",
         "unsigned int",
         keysize: 4,
@@ -432,29 +431,56 @@ module Vivarium
       nil
     end
 
+    def set_method_id(tid, method_id)
+      @current_method_id[tid] = method_id
+    end
+
+    def delete_method_id(tid)
+      @current_method_id.delete(tid)
+    rescue KeyError
+      nil
+    end
+  end
+
+  class EventReceiver
+    def initialize(socket_path: Vivarium.socket_path)
+      $stderr.puts "[vivarium] connecting to socket at #{socket_path}"
+      @sock = UNIXSocket.new(socket_path)
+      $stderr.puts "[vivarium] connected to socket at #{socket_path}"
+      @queue = Queue.new
+      @reader = Thread.new { read_loop }
+      @reader.abort_on_exception = true
+    end
+
     def drain_events
       events = []
-      EVENT_CAPACITY.times do |idx|
-        ptr = @event_invoked[idx]
-        next unless ptr
-
-        event = Event.from_binary(ptr[0, EVENT_STRUCT_SIZE])
-        next if event.empty?
-
-        events << event
-        @event_invoked[idx] = zeroed_event_ptr
+      loop do
+        events << @queue.pop(true)
+      rescue ThreadError
+        break
       end
-
-      @event_write_pos[0] = 0
       events
+    end
+
+    def close
+      @reader.kill
+      @sock.close rescue nil
     end
 
     private
 
-    def zeroed_event_ptr
-      ptr = Fiddle::Pointer.malloc(EVENT_STRUCT_SIZE)
-      ptr[0, EVENT_STRUCT_SIZE] = "\x00" * EVENT_STRUCT_SIZE
-      ptr
+    def read_loop
+      buf = String.new(encoding: Encoding::BINARY)
+      loop do
+        buf << @sock.readpartial(4096)
+        while buf.bytesize >= EVENT_STRUCT_SIZE
+          raw = buf.slice!(0, EVENT_STRUCT_SIZE)
+          event = Event.from_binary(raw)
+          @queue.push(event) unless event.empty?
+        end
+      end
+    rescue EOFError, IOError
+      nil
     end
   end
 
@@ -568,13 +594,14 @@ module Vivarium
         u32 pid;
         char event_name[16];
         char payload[#{EVENT_PAYLOAD_SIZE}];
+        u32 method_id;
       };
 
       BPF_HASH(config_root_targets, u32, u8, 1024);
       BPF_HASH(config_spawned_targets, u32, u8, 8192);
       BPF_HASH(dns_connected_tids, u32, u8, 8192);
-      BPF_ARRAY(event_invoked, struct event_t, #{EVENT_CAPACITY});
-      BPF_ARRAY(event_write_pos, u32, 1);
+      BPF_HASH(current_method_id, u32, u32, 1024);
+      BPF_RINGBUF_OUTPUT(events, (1U << 10));
 
       static __always_inline int target_enabled(u32 pid, u32 tid)
       {
@@ -616,17 +643,11 @@ module Vivarium
 
       static __always_inline void submit_event(struct event_t *ev)
       {
-        u32 zero = 0;
-        u32 *write_pos = event_write_pos.lookup(&zero);
-        if (!write_pos) {
-          return;
-        }
-
         ev->ktime_ns = bpf_ktime_get_ns();
-
-        u32 idx = *write_pos % #{EVENT_CAPACITY};
-        __sync_fetch_and_add(write_pos, 1);
-        event_invoked.update(&idx, ev);
+        u32 tid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
+        u32 *mid = current_method_id.lookup(&tid);
+        ev->method_id = mid ? *mid : 0;
+        events.ringbuf_output(ev, sizeof(*ev), 0);
       }
 
       static __always_inline int is_dns_destination(void *addr)
@@ -701,12 +722,22 @@ module Vivarium
         u8 *enabled_root = config_root_targets.lookup(&parent);
         if (enabled_root && *enabled_root == 1) {
           config_spawned_targets.update(&child, &one);
+          u32 *mid = current_method_id.lookup(&parent);
+          if (mid) {
+            u32 val = *mid;
+            current_method_id.update(&child, &val);
+          }
           return 0;
         }
 
         u8 *enabled_spawned = config_spawned_targets.lookup(&parent);
         if (enabled_spawned && *enabled_spawned == 1) {
           config_spawned_targets.update(&child, &one);
+          u32 *mid = current_method_id.lookup(&parent);
+          if (mid) {
+            u32 val = *mid;
+            current_method_id.update(&child, &val);
+          }
         }
 
         return 0;
@@ -716,6 +747,7 @@ module Vivarium
       {
         u32 tid = (u32)bpf_get_current_pid_tgid();
         config_spawned_targets.delete(&tid);
+        current_method_id.delete(&tid);
         dns_connected_tids.delete(&tid);
         return 0;
       }
@@ -1265,8 +1297,11 @@ module Vivarium
       }
     CLANG
 
-    def initialize(pin_dir: Vivarium.bpf_pin_dir)
+    def initialize(pin_dir: Vivarium.bpf_pin_dir, socket_path: Vivarium.socket_path)
       @pin_dir = pin_dir
+      @socket_path = socket_path
+      @clients = []
+      @clients_mutex = Mutex.new
     end
 
     def run
@@ -1284,25 +1319,45 @@ module Vivarium
 
       config_root_targets = bpf["config_root_targets"]
       config_spawned_targets = bpf["config_spawned_targets"]
-      event_invoked = bpf["event_invoked"]
-      event_write_pos = bpf["event_write_pos"]
-
-      clear_event_slots(event_invoked)
-      event_write_pos[0] = 0
+      current_method_id = bpf["current_method_id"]
       config_spawned_targets.clear
+      current_method_id.clear
 
       pin_map(config_root_targets, File.join(@pin_dir, "config_root_targets"))
       pin_map(config_spawned_targets, File.join(@pin_dir, "config_spawned_targets"))
-      pin_map(event_invoked, File.join(@pin_dir, "event_invoked"))
-      pin_map(event_write_pos, File.join(@pin_dir, "event_write_pos"))
+      pin_map(current_method_id, File.join(@pin_dir, "current_method_id"))
+
+      @_ringbuf_closure = Fiddle::Closure::BlockCaller.new(
+        Fiddle::TYPE_INT,
+        [Fiddle::TYPE_VOIDP, Fiddle::TYPE_VOIDP, Fiddle::TYPE_INT]
+      ) do |_dummy, data, size|
+        $stderr.puts "[vivariumd:ringbuf] event received size=#{size} clients=#{@clients.size}"
+        next 0 if size < EVENT_PAYLOAD_OFFSET
+        read_size = [size, EVENT_STRUCT_SIZE].min
+        event_data = data[0, read_size]
+        event_data = event_data.ljust(EVENT_STRUCT_SIZE, "\x00") if read_size < EVENT_STRUCT_SIZE
+        event = Event.from_binary(event_data)
+        $stderr.puts "[vivariumd:ringbuf] pid=#{event.pid} event_name=#{event.event_name} method_id=#{event.method_id}"
+        begin
+          broadcast_event(event_data)
+        rescue => e
+          warn "[vivariumd] broadcast error: #{e.class}: #{e.message}"
+        end
+        0
+      end
+      bpf._open_ring_buffer(bpf["events"].map_fd, @_ringbuf_closure, nil)
+
+      socket_thread = start_socket_server
 
       puts "[vivariumd] started"
       puts "[vivariumd] pinned maps in #{@pin_dir}"
+      puts "[vivariumd] socket listening on #{@socket_path}"
       puts "[vivariumd] watching LSM file_open (f_path offset=#{f_path_offset})"
       puts "[vivariumd] kprint logger enabled"
 
       loop do
-        sleep 1
+        bpf.ring_buffer_poll(0)
+        sleep 0.05
       end
     rescue Interrupt
       puts "\n[vivariumd] stopping"
@@ -1311,6 +1366,11 @@ module Vivarium
         kprint_thread.kill
         kprint_thread.join(0.2)
       end
+      if socket_thread
+        socket_thread.kill
+        socket_thread.join(0.2)
+      end
+      cleanup_socket
     end
 
     private
@@ -1326,31 +1386,51 @@ module Vivarium
       RbBCC::BCC.pin!(table.map_fd, path)
     end
 
-    def clear_event_slots(table)
-      ptr = Fiddle::Pointer.malloc(EVENT_STRUCT_SIZE)
-      ptr[0, EVENT_STRUCT_SIZE] = "\x00" * EVENT_STRUCT_SIZE
-      EVENT_CAPACITY.times do |idx|
-        table[idx] = ptr
+    def start_socket_server
+      FileUtils.mkdir_p(File.dirname(@socket_path))
+      File.unlink(@socket_path) if File.exist?(@socket_path)
+      @server = UNIXServer.new(@socket_path)
+      FileUtils.chmod(0o666, @socket_path)
+
+      Thread.new do
+        loop do
+          $stderr.puts "[vivariumd:socket] waiting for connection..."
+          client_sock = @server.accept
+          $stderr.puts "[vivariumd:socket] accepted connection"
+          cred = client_sock.getsockopt(Socket::SOL_SOCKET, Socket::SO_PEERCRED)
+          client_pid = cred.unpack("i!")[0]
+          @clients_mutex.synchronize do
+            @clients << { sock: client_sock, pid: client_pid }
+          end
+          $stderr.puts "[vivariumd:socket] client registered pid=#{client_pid} total=#{@clients.size}"
+        end
+      rescue => e
+        $stderr.puts "[vivariumd:socket] error: #{e.class}: #{e.message}"
+        $stderr.puts e.backtrace.first(5).join("\n")
       end
     end
 
-    def start_kprint_logger(bpf)
-      Thread.new do
-        begin
-          bpf.trace_fields do |_task, pid, _cpu, _flags, ts, msg|
-            line = msg.to_s.strip
-            next unless line.start_with?("vivarium:")
-
-            puts "[vivariumd:kprint #{ts} pid=#{pid}] #{line}"
+    def broadcast_event(data)
+      @clients_mutex.synchronize do
+        @clients.reject! do |client|
+          begin
+            client[:sock].write(data)
+            false
+          rescue Errno::EPIPE, IOError
+            client[:sock].close rescue nil
+            puts "[vivariumd] client disconnected pid=#{client[:pid]}"
+            true
           end
-        rescue IOError, Errno::EINTR
-          nil
-        rescue StandardError => e
-          warn "[vivariumd] kprint stream stopped: #{e.class}: #{e.message}"
         end
       end
-    rescue StandardError => e
-      warn "[vivariumd] failed to start kprint logger: #{e.class}: #{e.message}"
+    end
+
+    def cleanup_socket
+      @server&.close rescue nil
+      File.unlink(@socket_path) if @socket_path && File.exist?(@socket_path)
+    end
+
+    def start_kprint_logger(_bpf)
       nil
     end
 
@@ -1465,11 +1545,18 @@ module Vivarium
     end
   end
 
+  MethodContext = Struct.new(:defined_class, :method_id, :event, :path, :lineno, keyword_init: true)
+
   class ObservationSession
-    def initialize(store:, pid:, tracer:)
+    attr_writer :method_contexts
+
+    def initialize(store:, receiver:, pid:, tracer:, logger:)
       @store = store
+      @receiver = receiver
       @pid = pid
       @tracer = tracer
+      @logger = logger
+      @method_contexts = {}
       @stopped = false
     end
 
@@ -1477,56 +1564,117 @@ module Vivarium
       return if @stopped
 
       @tracer.disable
+      sleep 0.1
+      remaining = @receiver.drain_events
+      Vivarium.flush_events_by_method_id(@receiver, @logger, @method_contexts, remaining) unless remaining.empty?
+      @receiver.close
+      @store.delete_method_id(@pid)
       @store.unregister_pid(@pid)
       @stopped = true
     end
   end
 
-  def self.observe(pin_dir: bpf_pin_dir, logger: nil, dest: $stdout, format: :human)
-    return scoped_observe(pin_dir: pin_dir, logger: logger, dest: dest, format: format) { yield } if block_given?
+  def self.observe(pin_dir: bpf_pin_dir, socket_path: Vivarium.socket_path, logger: nil, dest: $stdout, format: :human)
+    if block_given?
+      return scoped_observe(pin_dir: pin_dir, socket_path: socket_path, logger: logger, dest: dest, format: format) { yield }
+    end
 
-    top_observe(pin_dir: pin_dir, logger: logger, dest: dest, format: format)
+    top_observe(pin_dir: pin_dir, socket_path: socket_path, logger: logger, dest: dest, format: format)
   end
 
-  def self.top_observe(pin_dir: bpf_pin_dir, logger: nil, dest: $stdout, format: :human)
+  def self.top_observe(pin_dir: bpf_pin_dir, socket_path: Vivarium.socket_path, logger: nil, dest: $stdout, format: :human)
     logger ||= Logger.new(dest: dest, format: format)
     store = MapStore.new(pin_dir: pin_dir)
+    receiver = EventReceiver.new(socket_path: socket_path)
     pid = Process.pid
     store.register_pid(pid)
     logger.info("top-level observing with pid=#{pid}")
 
-    tracer = build_observe_tracepoint(store, logger)
+    tracer, method_contexts = build_observe_tracepoint(store, receiver, logger)
     tracer.enable
 
-    session = ObservationSession.new(store: store, pid: pid, tracer: tracer)
+    session = ObservationSession.new(store: store, receiver: receiver, pid: pid, tracer: tracer, logger: logger)
+    session.method_contexts = method_contexts
     at_exit { session.stop }
     session
   end
 
-  def self.scoped_observe(pin_dir:, logger:, dest:, format:)
+  def self.scoped_observe(pin_dir:, socket_path:, logger:, dest:, format:)
     logger ||= Logger.new(dest: dest, format: format)
     store = MapStore.new(pin_dir: pin_dir)
+    receiver = EventReceiver.new(socket_path: socket_path)
     pid = Process.pid
     store.register_pid(pid)
     logger.info("scoped observing with pid=#{pid}")
 
-    tracer = build_observe_tracepoint(store, logger)
+    tracer, method_contexts = build_observe_tracepoint(store, receiver, logger)
     tracer.enable
 
     yield
   ensure
     tracer&.disable
+    if receiver
+      sleep 0.1
+      remaining = receiver.drain_events
+      flush_events_by_method_id(receiver, logger, method_contexts || {}, remaining) unless remaining.empty?
+      receiver.close
+    end
+    store&.delete_method_id(Process.pid)
     store&.unregister_pid(pid)
   end
 
-  def self.build_observe_tracepoint(store, logger)
-    TracePoint.new(:return, :c_return) do |tp|
-      events = store.drain_events
-      next if events.empty?
+  def self.build_observe_tracepoint(store, receiver, logger)
+    method_id_counter = 0
+    method_stack = []
+    method_contexts = {}
+    tid = Process.pid
 
-      stack = caller_locations(2, 16)
-      stack = stack.reject { |loc| loc.path.to_s.include?("vivarium") } if filter_internal_frames?
-      logger.log(events, tp, stack)
+    tracer = TracePoint.new(:call, :c_call, :return, :c_return) do |tp|
+      case tp.event
+      when :call, :c_call
+        method_id_counter += 1
+        ctx = MethodContext.new(
+          defined_class: tp.defined_class,
+          method_id: tp.method_id,
+          event: tp.event,
+          path: tp.path,
+          lineno: tp.lineno
+        )
+        method_contexts[method_id_counter] = ctx
+        method_stack.push(method_id_counter)
+        store.set_method_id(tid, method_id_counter)
+
+      when :return, :c_return
+        current_id = method_stack.pop
+        prev_id = method_stack.last || 0
+        store.set_method_id(tid, prev_id)
+
+        events = receiver.drain_events
+        unless events.empty?
+          flush_events_by_method_id(receiver, logger, method_contexts, events)
+        end
+
+        method_contexts.delete(current_id) if current_id
+      end
+    end
+
+    [tracer, method_contexts]
+  end
+
+  def self.flush_events_by_method_id(_receiver, logger, method_contexts, events)
+    grouped = events.group_by(&:method_id)
+    $stderr.puts "[vivarium:debug] flush #{events.size} events, method_ids=#{grouped.keys.inspect}, known_contexts=#{method_contexts.keys.sort.last(10).inspect}"
+    grouped.each do |mid, evts|
+      ctx = method_contexts[mid]
+      if ctx
+        $stderr.puts "[vivarium:debug] method_id=#{mid} -> #{ctx.defined_class}##{ctx.method_id} (#{evts.size} events)"
+      else
+        $stderr.puts "[vivarium:debug] method_id=#{mid} -> NOT FOUND (#{evts.size} events)"
+      end
+      ctx ||= MethodContext.new(
+        defined_class: "Unknown", method_id: :unknown, event: :unknown, path: "", lineno: 0
+      )
+      logger.log(evts, ctx, [])
     end
   end
 
@@ -1538,12 +1686,13 @@ module Vivarium
   end
 
   def self.run_daemon!(argv = ARGV)
-    options = { pin_dir: bpf_pin_dir }
+    options = { pin_dir: bpf_pin_dir, socket_path: socket_path }
     OptionParser.new do |opts|
-      opts.banner = "Usage: vivariumd [--pin-dir PATH]"
+      opts.banner = "Usage: vivariumd [--pin-dir PATH] [--socket-path PATH]"
       opts.on("--pin-dir PATH", "Pinned map directory") { |v| options[:pin_dir] = v }
+      opts.on("--socket-path PATH", "Unix socket path") { |v| options[:socket_path] = v }
     end.parse!(argv)
 
-    Daemon.new(pin_dir: options[:pin_dir]).run
+    Daemon.new(pin_dir: options[:pin_dir], socket_path: options[:socket_path]).run
   end
 end
