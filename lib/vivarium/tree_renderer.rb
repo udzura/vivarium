@@ -264,6 +264,7 @@ module Vivarium
       return SYNTHETIC_SPAN_NAME if span.method_id.nil?
 
       name = @method_table[span.method_id]
+      name ||= Vivarium::Usdt.get_method_name(span.method_id)
       return name if name
 
       @unresolved_method_ids << span.method_id

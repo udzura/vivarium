@@ -31,7 +31,15 @@ module Vivarium
   EVENT_NAME_OFFSET = 16
   EVENT_PAYLOAD_OFFSET = 32
   EVENTS_RINGBUF_PAGES = 256
-  SPAN_ALLOWLIST = ["Kernel#system"].freeze
+  SPAN_ALLOWLIST = [
+    "Kernel#system",
+    "Kernel#require",
+    "Kernel#require_relative",
+    "Kernel#load",
+    "Kernel#eval",
+    "Object#instance_eval",
+    "Object#instance_exec",
+  ].freeze
   EVENT_SEVERITY_HIGH = %w[
     capable_check bprm_creds setid_change task_kill
     ptrace_check sb_mount kernel_read_file
@@ -408,8 +416,15 @@ module Vivarium
       decoded = decode_file_getdents_payload(event.payload)
       decoded.empty? ? event.payload.inspect : decoded
     else
-      event.payload.inspect
+      strip_to_first_null(event.payload).inspect
     end
+  end
+
+  def self.strip_to_first_null(bytes)
+    nul = bytes.index("\x00")
+    return bytes if nul.nil?
+
+    bytes[0, nul]
   end
 
   class MapStore
