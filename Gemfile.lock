@@ -3,13 +3,7 @@ PATH
   specs:
     vivarium (0.2.0)
       rbbcc (~> 0.11.4)
-      vivarium_usdt
-
-PATH
-  remote: .claude/resources/vivarium_usdt
-  specs:
-    vivarium_usdt (0.1.0)
-      rb_sys (~> 0.9.91)
+      vivarium_usdt (~> 0.1.0)
 
 GEM
   remote: https://rubygems.org/
@@ -48,6 +42,8 @@ GEM
     test-unit (3.7.7)
       power_assert
     tsort (0.2.0)
+    vivarium_usdt (0.1.0)
+      rb_sys (~> 0.9.91)
 
 PLATFORMS
   arm64-darwin-25
@@ -59,7 +55,7 @@ DEPENDENCIES
   rake (~> 13.0)
   test-unit (~> 3.0)
   vivarium!
-  vivarium_usdt!
+  vivarium_usdt (~> 0.1)
 
 CHECKSUMS
   date (3.5.1) sha256=750d06384d7b9c15d562c76291407d89e368dda4d4fff957eb94962d325a0dc0
@@ -83,7 +79,7 @@ CHECKSUMS
   test-unit (3.7.7) sha256=3c89d5ff0690a16bef9946156c4624390402b9d54dfcf4ce9cbd5b06bead1e45
   tsort (0.2.0) sha256=9650a793f6859a43b6641671278f79cfead60ac714148aabe4e3f0060480089f
   vivarium (0.2.0)
-  vivarium_usdt (0.1.0)
+  vivarium_usdt (0.1.0) sha256=196527e231dd8b701a6e6530c935ab3d44012f4b63f0d72c2b3aebe6e03d3769
 
 BUNDLED WITH
   4.0.6
