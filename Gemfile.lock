@@ -3,7 +3,7 @@ PATH
   specs:
     vivarium (0.2.0)
       rbbcc (~> 0.11.4)
-      vivarium_usdt (~> 0.1.0)
+      vivarium_usdt (~> 0.2.0)
 
 GEM
   remote: https://rubygems.org/
@@ -42,7 +42,7 @@ GEM
     test-unit (3.7.7)
       power_assert
     tsort (0.2.0)
-    vivarium_usdt (0.1.0)
+    vivarium_usdt (0.2.0)
       rb_sys (~> 0.9.91)
 
 PLATFORMS
@@ -79,7 +79,7 @@ CHECKSUMS
   test-unit (3.7.7) sha256=3c89d5ff0690a16bef9946156c4624390402b9d54dfcf4ce9cbd5b06bead1e45
   tsort (0.2.0) sha256=9650a793f6859a43b6641671278f79cfead60ac714148aabe4e3f0060480089f
   vivarium (0.2.0)
-  vivarium_usdt (0.1.0) sha256=196527e231dd8b701a6e6530c935ab3d44012f4b63f0d72c2b3aebe6e03d3769
+  vivarium_usdt (0.2.0) sha256=1ae983ef3df67f7077b2c54ac0777bcae8a1db15e6fa8f28dd8f4540ac58007d
 
 BUNDLED WITH
   4.0.6
