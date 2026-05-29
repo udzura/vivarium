@@ -1,9 +1,6 @@
 # frozen_string_literal: true
 
 require "test_helper"
-require "ostruct"
-require "stringio"
-require "json"
 
 class VivariumTest < Test::Unit::TestCase
   test "VERSION" do
@@ -110,31 +107,6 @@ class VivariumTest < Test::Unit::TestCase
   test "event has severity metadata" do
     event = Vivarium::Event.new(ktime_ns: 1, pid: 100, event_name: "task_kill", payload: "")
     assert_equal "high", event.severity
-  end
-
-  test "logger human colors high severity in red" do
-    io = StringIO.new
-    logger = Vivarium::Logger.new(dest: io, format: :human)
-    tp = OpenStruct.new(defined_class: "Kernel", method_id: "system", event: "return", path: "demo.rb", lineno: 10)
-    event = Vivarium::Event.new(ktime_ns: 10, pid: 200, event_name: "task_kill", payload: [15].pack("l<").ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00"))
-
-    logger.log([event], tp, [])
-    out = io.string
-    assert_match(/severity=high/, out)
-    assert_match(/\e\[31m/, out)
-  end
-
-  test "logger json includes severity" do
-    io = StringIO.new
-    logger = Vivarium::Logger.new(dest: io, format: :json)
-    tp = OpenStruct.new(defined_class: "Kernel", method_id: "system", event: "return", path: "demo.rb", lineno: 10)
-    high_event = Vivarium::Event.new(ktime_ns: 1, pid: 1, event_name: "task_kill", payload: [9].pack("l<").ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00"))
-    medium_event = Vivarium::Event.new(ktime_ns: 2, pid: 2, event_name: "proc_exec", payload: "".ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00"))
-
-    logger.log([high_event, medium_event], tp, [])
-    parsed = JSON.parse(io.string)
-    assert_equal "high", parsed.fetch("events").first.fetch("severity")
-    assert_equal "medium", parsed.fetch("events").last.fetch("severity")
   end
 
   test "decode file_symlink payload" do

@@ -7,7 +7,6 @@ require "pathname"
 require "rbbcc"
 require "socket"
 require_relative "vivarium/version"
-require_relative "vivarium/logger"
 require_relative "vivarium/cli"
 
 module Vivarium
