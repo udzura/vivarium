@@ -7,7 +7,6 @@ require "pathname"
 require "rbbcc"
 require "socket"
 require_relative "vivarium/version"
-require_relative "vivarium/logger"
 require_relative "vivarium/cli"
 
 module Vivarium
@@ -17,8 +16,7 @@ module Vivarium
   CONFIG_ROOT_TARGETS_PIN = File.join(PIN_DIR, "config_root_targets")
   CONFIG_SPAWNED_TARGETS_PIN = File.join(PIN_DIR, "config_spawned_targets")
   CONFIG_TARGETS_PIN = CONFIG_ROOT_TARGETS_PIN
-  EVENT_INVOKED_PIN = File.join(PIN_DIR, "event_invoked")
-  EVENT_WRITE_POS_PIN = File.join(PIN_DIR, "event_write_pos")
+  EVENTS_PIN = File.join(PIN_DIR, "events")
 
   EVENT_NAME_SIZE = 16
   EVENT_PAYLOAD_SIZE = 256
@@ -28,9 +26,33 @@ module Vivarium
   EVENT_STRUCT_SIZE = 288
   EVENT_TS_OFFSET = 0
   EVENT_PID_OFFSET = 8
-  EVENT_NAME_OFFSET = 12
-  EVENT_PAYLOAD_OFFSET = 28
-  EVENT_CAPACITY = 1024
+  EVENT_TID_OFFSET = 12
+  EVENT_NAME_OFFSET = 16
+  EVENT_PAYLOAD_OFFSET = 32
+  EVENTS_RINGBUF_PAGES = 256
+  SPAN_ALLOWCLASSES = [
+    Socket,
+    BasicSocket,
+    IPSocket,
+    TCPSocket,
+    UDPSocket,
+    UNIXSocket,
+    File,
+    Dir,
+    Signal,
+    Process,
+    Process::UID,
+    Process::GID,
+  ]
+  SPAN_ALLOWLIST = [
+    "Kernel#system",
+    "Kernel#require",
+    "Kernel#require_relative",
+    "Kernel#load",
+    "Kernel#eval",
+    "Object#instance_eval",
+    "Object#instance_exec",
+  ].freeze
   EVENT_SEVERITY_HIGH = %w[
     capable_check bprm_creds setid_change task_kill
     ptrace_check sb_mount kernel_read_file
@@ -84,49 +106,12 @@ module Vivarium
     end
   end
 
-  Event = Struct.new(:ktime_ns, :pid, :event_name, :payload, keyword_init: true) do
-    def empty?
-      ktime_ns.to_i.zero? && pid.to_i.zero? && event_name.to_s.empty? && payload.to_s.empty?
-    end
-
-    def severity
-      Vivarium.event_severity(event_name)
-    end
-
-    def self.from_binary(raw)
-      bytes = raw.to_s.b
-      bytes = bytes.ljust(EVENT_STRUCT_SIZE, "\x00")
-
-      ktime_ns = bytes[EVENT_TS_OFFSET, EVENT_TS_SIZE].unpack1("Q<")
-      pid = bytes[EVENT_PID_OFFSET, 4].unpack1("L<")
-      event_name = c_string(bytes[EVENT_NAME_OFFSET, EVENT_NAME_SIZE])
-      raw_payload = bytes[EVENT_PAYLOAD_OFFSET, EVENT_PAYLOAD_SIZE]
-      raw_payload_events = %w[
-        dns_req sock_connect odd_socket proc_exec
-        file_symlink file_hardlink file_rename file_chmod file_getdents
-        ptrace_check sb_mount kernel_read_file task_kill
-        setid_change capable_check bprm_creds
-      ]
-      payload = if raw_payload_events.include?(event_name)
-                  raw_payload
-                else
-                  c_string(raw_payload)
-                end
-
-      new(ktime_ns: ktime_ns, pid: pid, event_name: event_name, payload: payload)
-    end
-
-    def self.c_string(bytes)
-      str = bytes.to_s.b
-      nul = str.index("\x00")
-      return str if nul.nil?
-
-      str[0, nul]
-    end
-  end
-
   def self.c_string(bytes)
-    Event.c_string(bytes)
+    str = bytes.to_s.b
+    nul = str.index("\x00")
+    return str if nul.nil?
+
+    str[0, nul]
   end
 
   def self.event_severity(event_name)
@@ -331,6 +316,32 @@ module Vivarium
     "has_file=#{has_file} file=#{path.inspect}"
   end
 
+  def self.decode_proc_fork_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < 8
+
+    child_pid = bytes[0, 4].unpack1("L<")
+    child_tid = bytes[4, 4].unpack1("L<")
+    "child_pid=#{child_pid} child_tid=#{child_tid}"
+  end
+
+  def self.decode_span_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < 8
+
+    method_id = bytes[0, 8].unpack1("q<")
+    result = format("method_id=0x%016X", method_id & 0xFFFF_FFFF_FFFF_FFFF)
+
+    if bytes.bytesize >= 24
+      file_id = bytes[8, 8].unpack1("q<")
+      lineno = bytes[16, 8].unpack1("q<")
+      result += format(" file_id=0x%016X", file_id & 0xFFFF_FFFF_FFFF_FFFF) if file_id != -1
+      result += " lineno=#{lineno}" if lineno > 0
+    end
+
+    result
+  end
+
   def self.render_event_payload(event)
     case event.event_name
     when "dns_req"
@@ -366,6 +377,12 @@ module Vivarium
     when "bprm_creds"
       decoded = decode_bprm_creds_payload(event.payload)
       decoded.empty? ? event.payload.inspect : decoded
+    when "proc_fork"
+      decoded = decode_proc_fork_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "span_start", "span_stop", "span_raise"
+      decoded = decode_span_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
     when "file_symlink"
       decoded = decode_file_symlink_payload(event.payload)
       decoded.empty? ? event.payload.inspect : decoded
@@ -382,8 +399,15 @@ module Vivarium
       decoded = decode_file_getdents_payload(event.payload)
       decoded.empty? ? event.payload.inspect : decoded
     else
-      event.payload.inspect
+      strip_to_first_null(event.payload).inspect
     end
+  end
+
+  def self.strip_to_first_null(bytes)
+    nul = bytes.index("\x00")
+    return bytes if nul.nil?
+
+    bytes[0, nul]
   end
 
   class MapStore
@@ -403,20 +427,6 @@ module Vivarium
         keysize: 4,
         leafsize: 1
       )
-      @event_invoked = RbBCC::ArrayTable.from_pin(
-        File.join(@pin_dir, "event_invoked"),
-        "unsigned int",
-        "char[#{EVENT_STRUCT_SIZE}]",
-        keysize: 4,
-        leafsize: EVENT_STRUCT_SIZE
-      )
-      @event_write_pos = RbBCC::ArrayTable.from_pin(
-        File.join(@pin_dir, "event_write_pos"),
-        "unsigned int",
-        "unsigned int",
-        keysize: 4,
-        leafsize: 4
-      )
     rescue StandardError => e
       raise Error, "failed to open pinned maps under #{@pin_dir}: #{e.class}: #{e.message}"
     end
@@ -430,31 +440,6 @@ module Vivarium
       @config_spawned_targets.clear
     rescue KeyError
       nil
-    end
-
-    def drain_events
-      events = []
-      EVENT_CAPACITY.times do |idx|
-        ptr = @event_invoked[idx]
-        next unless ptr
-
-        event = Event.from_binary(ptr[0, EVENT_STRUCT_SIZE])
-        next if event.empty?
-
-        events << event
-        @event_invoked[idx] = zeroed_event_ptr
-      end
-
-      @event_write_pos[0] = 0
-      events
-    end
-
-    private
-
-    def zeroed_event_ptr
-      ptr = Fiddle::Pointer.malloc(EVENT_STRUCT_SIZE)
-      ptr[0, EVENT_STRUCT_SIZE] = "\x00" * EVENT_STRUCT_SIZE
-      ptr
     end
   end
 
@@ -566,6 +551,7 @@ module Vivarium
       struct event_t {
         u64 ktime_ns;
         u32 pid;
+        u32 tid;
         char event_name[16];
         char payload[#{EVENT_PAYLOAD_SIZE}];
       };
@@ -573,8 +559,7 @@ module Vivarium
       BPF_HASH(config_root_targets, u32, u8, 1024);
       BPF_HASH(config_spawned_targets, u32, u8, 8192);
       BPF_HASH(dns_connected_tids, u32, u8, 8192);
-      BPF_ARRAY(event_invoked, struct event_t, #{EVENT_CAPACITY});
-      BPF_ARRAY(event_write_pos, u32, 1);
+      BPF_RINGBUF_OUTPUT(events, #{EVENTS_RINGBUF_PAGES});
 
       static __always_inline int target_enabled(u32 pid, u32 tid)
       {
@@ -614,19 +599,18 @@ module Vivarium
         }
       }
 
-      static __always_inline void submit_event(struct event_t *ev)
+      static __always_inline void submit_event(struct event_t *src)
       {
-        u32 zero = 0;
-        u32 *write_pos = event_write_pos.lookup(&zero);
-        if (!write_pos) {
+        struct event_t *ev = events.ringbuf_reserve(sizeof(struct event_t));
+        if (!ev) {
           return;
         }
 
+        __builtin_memcpy(ev, src, sizeof(*ev));
         ev->ktime_ns = bpf_ktime_get_ns();
+        ev->tid = (u32)bpf_get_current_pid_tgid();
 
-        u32 idx = *write_pos % #{EVENT_CAPACITY};
-        __sync_fetch_and_add(write_pos, 1);
-        event_invoked.update(&idx, ev);
+        events.ringbuf_submit(ev, 0);
       }
 
       static __always_inline int is_dns_destination(void *addr)
@@ -697,16 +681,28 @@ module Vivarium
         u32 parent = args->parent_pid;
         u32 child = args->child_pid;
         u8 one = 1;
+        int is_target = 0;
 
         u8 *enabled_root = config_root_targets.lookup(&parent);
         if (enabled_root && *enabled_root == 1) {
+          is_target = 1;
           config_spawned_targets.update(&child, &one);
-          return 0;
+        } else {
+          u8 *enabled_spawned = config_spawned_targets.lookup(&parent);
+          if (enabled_spawned && *enabled_spawned == 1) {
+            is_target = 1;
+            config_spawned_targets.update(&child, &one);
+          }
         }
 
-        u8 *enabled_spawned = config_spawned_targets.lookup(&parent);
-        if (enabled_spawned && *enabled_spawned == 1) {
-          config_spawned_targets.update(&child, &one);
+        if (is_target) {
+          u64 pid_tgid = bpf_get_current_pid_tgid();
+          struct event_t ev = {};
+          ev.pid = pid_tgid >> 32;
+          __builtin_memcpy(ev.event_name, "proc_fork", 10);
+          __builtin_memcpy(&ev.payload[0], &child, sizeof(child));
+          __builtin_memcpy(&ev.payload[4], &child, sizeof(child));
+          submit_event(&ev);
         }
 
         return 0;
@@ -725,7 +721,6 @@ module Vivarium
         u64 pid_tgid = bpf_get_current_pid_tgid();
         u32 pid = pid_tgid >> 32;
         u32 tid = (u32)pid_tgid;
-        bpf_trace_printk("vivarium: invoked pid=%d\\n", pid);
         if (!target_enabled(pid, tid)) {
           return 0;
         }
@@ -739,11 +734,9 @@ module Vivarium
         if (path_ret < 0) {
           if (ev.payload[0] == 0) {
             __builtin_memcpy(ev.payload, "<path_error>", 13);
-            bpf_trace_printk("vivarium: failed to obtain full path. pid=%d path=%s\\n", pid, ev.payload);
           }
         }
 
-        bpf_trace_printk("vivarium: pid=%d path=%s\\n", pid, ev.payload);
         submit_event(&ev);
 
         return 0;
@@ -1263,6 +1256,87 @@ module Vivarium
         submit_event(&ev);
         return 0;
       }
+
+      int on_span_start(struct pt_regs *ctx)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        u64 method_id = 0;
+        u64 file_id = 0;
+        u64 lineno = 0;
+        bpf_usdt_readarg(1, ctx, &method_id);
+        bpf_usdt_readarg(2, ctx, &file_id);
+        bpf_usdt_readarg(3, ctx, &lineno);
+
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "span_start", 11);
+        __builtin_memcpy(&ev.payload[0], &method_id, sizeof(method_id));
+        __builtin_memcpy(&ev.payload[8], &file_id, sizeof(file_id));
+        __builtin_memcpy(&ev.payload[16], &lineno, sizeof(lineno));
+        submit_event(&ev);
+        return 0;
+      }
+
+      int on_span_stop(struct pt_regs *ctx)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        u64 method_id = 0;
+        u64 file_id = 0;
+        u64 lineno = 0;
+        bpf_usdt_readarg(1, ctx, &method_id);
+        bpf_usdt_readarg(2, ctx, &file_id);
+        bpf_usdt_readarg(3, ctx, &lineno);
+
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "span_stop", 10);
+        __builtin_memcpy(&ev.payload[0], &method_id, sizeof(method_id));
+        __builtin_memcpy(&ev.payload[8], &file_id, sizeof(file_id));
+        __builtin_memcpy(&ev.payload[16], &lineno, sizeof(lineno));
+        submit_event(&ev);
+        return 0;
+      }
+
+      int on_span_raise(struct pt_regs *ctx)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        u64 error_id = 0;
+        u64 file_id = 0;
+        u64 lineno = 0;
+        bpf_usdt_readarg(1, ctx, &error_id);
+        bpf_usdt_readarg(2, ctx, &file_id);
+        bpf_usdt_readarg(3, ctx, &lineno);
+
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "span_raise", 11);
+        __builtin_memcpy(&ev.payload[0], &error_id, sizeof(error_id));
+        __builtin_memcpy(&ev.payload[8], &file_id, sizeof(file_id));
+        __builtin_memcpy(&ev.payload[16], &lineno, sizeof(lineno));
+        submit_event(&ev);
+        return 0;
+      }
     CLANG
 
     def initialize(pin_dir: Vivarium.bpf_pin_dir)
@@ -1279,38 +1353,34 @@ module Vivarium
         .gsub("__VIVARIUM_F_PATH_OFFSET__", f_path_offset.to_s)
         .gsub("__VIVARIUM_DENTRY_D_NAME_OFFSET__", d_name_offset.to_s)
 
-      bpf = RbBCC::BCC.new(text: program)
-      kprint_thread = start_kprint_logger(bpf)
+      usdt_so_path = ENV.fetch("VIVARIUM_USDT_SO_PATH") { Vivarium.locate_vivarium_usdt_so }
+      usdt = RbBCC::USDT.new(path: usdt_so_path)
+      usdt.enable_probe(probe: "start_probe", fn_name: "on_span_start")
+      usdt.enable_probe(probe: "stop_probe", fn_name: "on_span_stop")
+      usdt.enable_probe(probe: "raise_probe", fn_name: "on_span_raise")
+
+      bpf = RbBCC::BCC.new(text: program, usdt_contexts: [usdt])
 
       config_root_targets = bpf["config_root_targets"]
       config_spawned_targets = bpf["config_spawned_targets"]
-      event_invoked = bpf["event_invoked"]
-      event_write_pos = bpf["event_write_pos"]
+      events_ringbuf = bpf["events"]
 
-      clear_event_slots(event_invoked)
-      event_write_pos[0] = 0
       config_spawned_targets.clear
 
       pin_map(config_root_targets, File.join(@pin_dir, "config_root_targets"))
       pin_map(config_spawned_targets, File.join(@pin_dir, "config_spawned_targets"))
-      pin_map(event_invoked, File.join(@pin_dir, "event_invoked"))
-      pin_map(event_write_pos, File.join(@pin_dir, "event_write_pos"))
+      pin_map(events_ringbuf, File.join(@pin_dir, "events"))
 
       puts "[vivariumd] started"
       puts "[vivariumd] pinned maps in #{@pin_dir}"
       puts "[vivariumd] watching LSM file_open (f_path offset=#{f_path_offset})"
-      puts "[vivariumd] kprint logger enabled"
+      puts "[vivariumd] USDT attached via #{usdt_so_path}"
 
       loop do
         sleep 1
       end
     rescue Interrupt
       puts "\n[vivariumd] stopping"
-    ensure
-      if kprint_thread
-        kprint_thread.kill
-        kprint_thread.join(0.2)
-      end
     end
 
     private
@@ -1324,34 +1394,6 @@ module Vivarium
     def pin_map(table, path)
       File.unlink(path) if File.exist?(path)
       RbBCC::BCC.pin!(table.map_fd, path)
-    end
-
-    def clear_event_slots(table)
-      ptr = Fiddle::Pointer.malloc(EVENT_STRUCT_SIZE)
-      ptr[0, EVENT_STRUCT_SIZE] = "\x00" * EVENT_STRUCT_SIZE
-      EVENT_CAPACITY.times do |idx|
-        table[idx] = ptr
-      end
-    end
-
-    def start_kprint_logger(bpf)
-      Thread.new do
-        begin
-          bpf.trace_fields do |_task, pid, _cpu, _flags, ts, msg|
-            line = msg.to_s.strip
-            next unless line.start_with?("vivarium:")
-
-            puts "[vivariumd:kprint #{ts} pid=#{pid}] #{line}"
-          end
-        rescue IOError, Errno::EINTR
-          nil
-        rescue StandardError => e
-          warn "[vivariumd] kprint stream stopped: #{e.class}: #{e.message}"
-        end
-      end
-    rescue StandardError => e
-      warn "[vivariumd] failed to start kprint logger: #{e.class}: #{e.message}"
-      nil
     end
 
     def detect_f_path_offset
@@ -1466,75 +1508,131 @@ module Vivarium
   end
 
   class ObservationSession
-    def initialize(store:, pid:, tracer:)
+    def initialize(store:, pid:, tracer:, correlator:)
       @store = store
       @pid = pid
       @tracer = tracer
+      @correlator = correlator
       @stopped = false
     end
 
     def stop
       return if @stopped
 
+      @stopped = true
       @tracer.disable
       @store.unregister_pid(@pid)
-      @stopped = true
+      @correlator.stop
     end
   end
 
-  def self.observe(pin_dir: bpf_pin_dir, logger: nil, dest: $stdout, format: :human)
-    return scoped_observe(pin_dir: pin_dir, logger: logger, dest: dest, format: format) { yield } if block_given?
+  def self.observe(pin_dir: bpf_pin_dir, dest: $stdout, &block)
+    return scoped_observe(pin_dir: pin_dir, dest: dest, &block) if block_given?
 
-    top_observe(pin_dir: pin_dir, logger: logger, dest: dest, format: format)
+    top_observe(pin_dir: pin_dir, dest: dest)
   end
 
-  def self.top_observe(pin_dir: bpf_pin_dir, logger: nil, dest: $stdout, format: :human)
-    logger ||= Logger.new(dest: dest, format: format)
+  def self.top_observe(pin_dir: bpf_pin_dir, dest: $stdout)
+    require "vivarium_usdt"
+
     store = MapStore.new(pin_dir: pin_dir)
     pid = Process.pid
     store.register_pid(pid)
-    logger.info("top-level observing with pid=#{pid}")
 
-    tracer = build_observe_tracepoint(store, logger)
+    method_id_queue = Thread::Queue.new
+    main_tid = gettid
+
+    correlator = Correlator.new(
+      pin_dir: pin_dir,
+      observer_pid: pid,
+      main_tid: main_tid,
+      method_id_queue: method_id_queue,
+      dest: dest
+    )
+    correlator.start
+
+    tracer = build_observe_tracepoint(method_id_queue)
     tracer.enable
 
-    session = ObservationSession.new(store: store, pid: pid, tracer: tracer)
+    session = ObservationSession.new(
+      store: store, pid: pid, tracer: tracer, correlator: correlator
+    )
     at_exit { session.stop }
     session
   end
 
-  def self.scoped_observe(pin_dir:, logger:, dest:, format:)
-    logger ||= Logger.new(dest: dest, format: format)
+  def self.scoped_observe(pin_dir:, dest:)
+    require "vivarium_usdt"
+
     store = MapStore.new(pin_dir: pin_dir)
     pid = Process.pid
     store.register_pid(pid)
-    logger.info("scoped observing with pid=#{pid}")
 
-    tracer = build_observe_tracepoint(store, logger)
+    method_id_queue = Thread::Queue.new
+    main_tid = gettid
+
+    correlator = Correlator.new(
+      pin_dir: pin_dir,
+      observer_pid: pid,
+      main_tid: main_tid,
+      method_id_queue: method_id_queue,
+      dest: dest
+    )
+    correlator.start
+
+    tracer = build_observe_tracepoint(method_id_queue)
     tracer.enable
 
     yield
   ensure
     tracer&.disable
     store&.unregister_pid(pid)
+    correlator&.stop
   end
 
-  def self.build_observe_tracepoint(store, logger)
-    TracePoint.new(:return, :c_return) do |tp|
-      events = store.drain_events
-      next if events.empty?
+  def self.build_observe_tracepoint(method_id_queue)
+    allow_classes = SPAN_ALLOWCLASSES
+    allowlist = SPAN_ALLOWLIST
+    TracePoint.new(:call, :c_call, :return, :c_return) do |tp|
+      signature = "#{tp.defined_class}##{tp.method_id}"
+      is_target = allowlist.include?(signature) || \
+        allow_classes.any? { |klass| tp.defined_class == klass } || \
+        allow_classes.any? { |klass| tp.defined_class == klass.singleton_class }
+      next unless is_target
 
-      stack = caller_locations(2, 16)
-      stack = stack.reject { |loc| loc.path.to_s.include?("vivarium") } if filter_internal_frames?
-      logger.log(events, tp, stack)
+      case tp.event
+      when :call, :c_call
+        method_id = Vivarium::Usdt.start(tp.defined_class.to_s, tp.method_id.to_s, file: tp.path, lineno: tp.lineno)
+        method_id_queue << [method_id, signature]
+      when :return, :c_return
+        Vivarium::Usdt.stop(tp.defined_class.to_s, tp.method_id.to_s, file: tp.path, lineno: tp.lineno)
+      end
     end
   end
 
-  def self.filter_internal_frames?
-    value = ENV["VIVARIUM_FILTER_INTERNAL_FRAMES"]
-    return true if value.nil?
+  def self.gettid
+    @gettid_func ||= begin
+      libc = Fiddle.dlopen("libc.so.6")
+      Fiddle::Function.new(libc["gettid"], [], Fiddle::TYPE_INT)
+    rescue Fiddle::DLError
+      libc = Fiddle.dlopen(nil)
+      Fiddle::Function.new(libc["gettid"], [], Fiddle::TYPE_INT)
+    end
+    @gettid_func.call
+  end
 
-    !%w[0 false off no].include?(value.strip.downcase)
+  def self.monotonic_ktime_ns
+    Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+  end
+
+  def self.locate_vivarium_usdt_so
+    require "vivarium_usdt/vivarium_usdt"
+    so = $LOADED_FEATURES.find { |p| p =~ %r{vivarium_usdt/vivarium_usdt\.(so|bundle|dylib)\z} }
+    raise Error, "vivarium_usdt native extension not found in $LOADED_FEATURES" unless so
+
+    File.realpath(so)
+  rescue LoadError => e
+    raise Error, "failed to load vivarium_usdt: #{e.message}"
   end
 
   def self.run_daemon!(argv = ARGV)
@@ -1547,3 +1645,6 @@ module Vivarium
     Daemon.new(pin_dir: options[:pin_dir]).run
   end
 end
+
+require_relative "vivarium/correlator"
+require_relative "vivarium/tree_renderer"
