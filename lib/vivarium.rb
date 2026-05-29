@@ -92,51 +92,12 @@ module Vivarium
     end
   end
 
-  Event = Struct.new(:ktime_ns, :pid, :tid, :event_name, :payload, keyword_init: true) do
-    def empty?
-      ktime_ns.to_i.zero? && pid.to_i.zero? && event_name.to_s.empty? && payload.to_s.empty?
-    end
-
-    def severity
-      Vivarium.event_severity(event_name)
-    end
-
-    def self.from_binary(raw)
-      bytes = raw.to_s.b
-      bytes = bytes.ljust(EVENT_STRUCT_SIZE, "\x00")
-
-      ktime_ns = bytes[EVENT_TS_OFFSET, EVENT_TS_SIZE].unpack1("Q<")
-      pid = bytes[EVENT_PID_OFFSET, 4].unpack1("L<")
-      tid = bytes[EVENT_TID_OFFSET, 4].unpack1("L<")
-      event_name = c_string(bytes[EVENT_NAME_OFFSET, EVENT_NAME_SIZE])
-      raw_payload = bytes[EVENT_PAYLOAD_OFFSET, EVENT_PAYLOAD_SIZE]
-      raw_payload_events = %w[
-        dns_req sock_connect odd_socket proc_exec
-        file_symlink file_hardlink file_rename file_chmod file_getdents
-        ptrace_check sb_mount kernel_read_file task_kill
-        setid_change capable_check bprm_creds proc_fork
-        span_start span_stop span_raise
-      ]
-      payload = if raw_payload_events.include?(event_name)
-                  raw_payload
-                else
-                  c_string(raw_payload)
-                end
-
-      new(ktime_ns: ktime_ns, pid: pid, tid: tid, event_name: event_name, payload: payload)
-    end
-
-    def self.c_string(bytes)
-      str = bytes.to_s.b
-      nul = str.index("\x00")
-      return str if nul.nil?
-
-      str[0, nul]
-    end
-  end
-
   def self.c_string(bytes)
-    Event.c_string(bytes)
+    str = bytes.to_s.b
+    nul = str.index("\x00")
+    return str if nul.nil?
+
+    str[0, nul]
   end
 
   def self.event_severity(event_name)

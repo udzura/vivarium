@@ -403,11 +403,7 @@ module Vivarium
     end
 
     def render_target(ev)
-      ev_view = Vivarium::Event.new(
-        ktime_ns: ev.ktime_ns, pid: ev.pid,
-        event_name: ev.event_name, payload: ev.payload
-      )
-      text = Vivarium.render_event_payload(ev_view).to_s
+      text = Vivarium.render_event_payload(ev).to_s
       text = text.gsub(/\s+/, " ").strip
       text.empty? ? "-" : text
     end

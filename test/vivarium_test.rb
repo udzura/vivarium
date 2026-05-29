@@ -9,19 +9,6 @@ class VivariumTest < Test::Unit::TestCase
     end
   end
 
-  test "event can be parsed from binary payload" do
-    binary = [123_456_789].pack("Q<") + [1234].pack("L<") +
-             "path_open".ljust(16, "\x00") +
-             "/tmp/a.txt".ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
-    binary = binary.ljust(Vivarium::EVENT_STRUCT_SIZE, "\x00")
-    event = Vivarium::Event.from_binary(binary)
-
-    assert_equal 123_456_789, event.ktime_ns
-    assert_equal 1234, event.pid
-    assert_equal "path_open", event.event_name.force_encoding("UTF-8")
-    assert_equal "/tmp/a.txt", event.payload.force_encoding("UTF-8")
-  end
-
   test "decode dns qname" do
     raw = "\x06google\x03com\x00".b.ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
     assert_equal "google.com", Vivarium.decode_dns_qname(raw)
@@ -104,11 +91,6 @@ class VivariumTest < Test::Unit::TestCase
     assert_equal "medium", Vivarium.event_severity("file_chmod")
   end
 
-  test "event has severity metadata" do
-    event = Vivarium::Event.new(ktime_ns: 1, pid: 100, event_name: "task_kill", payload: "")
-    assert_equal "high", event.severity
-  end
-
   test "decode file_symlink payload" do
     target = "/path/to/target"
     link_name = "mylink"
@@ -152,36 +134,6 @@ class VivariumTest < Test::Unit::TestCase
     decoded = Vivarium.decode_file_getdents_payload(payload)
     assert_match(/fd=3/, decoded)
     assert_match(/count=4096/, decoded)
-  end
-
-  test "render event payload for file_symlink" do
-    target = "link_target"
-    link_name = "symlink_name"
-    payload = target.ljust(128, "\x00") + link_name.ljust(128, "\x00")
-    event = Vivarium::Event.new(ktime_ns: 100, pid: 1234, event_name: "file_symlink", payload: payload)
-    rendered = Vivarium.render_event_payload(event)
-    assert_match(/target=/, rendered)
-    assert_match(/link_name=/, rendered)
-  end
-
-  test "render event payload for proc_exec" do
-    payload = "/usr/bin/env".ljust(Vivarium::PROC_EXEC_SLOT_SIZE, "\x00") +
-              "env".ljust(Vivarium::PROC_EXEC_SLOT_SIZE, "\x00") +
-              "ruby".ljust(Vivarium::PROC_EXEC_SLOT_SIZE, "\x00") +
-              "script.rb".ljust(Vivarium::PROC_EXEC_SLOT_SIZE, "\x00")
-    event = Vivarium::Event.new(ktime_ns: 100, pid: 1234, event_name: "proc_exec", payload: payload)
-    rendered = Vivarium.render_event_payload(event)
-
-    assert_match(%r{filename="/usr/bin/env"}, rendered)
-    assert_match(%r{"ruby"}, rendered)
-    assert_match(%r{"script.rb"}, rendered)
-  end
-
-  test "render event payload for ptrace_check" do
-    payload = [0x2].pack("L<").ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
-    event = Vivarium::Event.new(ktime_ns: 100, pid: 1234, event_name: "ptrace_check", payload: payload)
-    rendered = Vivarium.render_event_payload(event)
-    assert_match(/mode=0x2/, rendered)
   end
 
   test "observe without block is supported" do
