@@ -30,6 +30,20 @@ module Vivarium
   EVENT_NAME_OFFSET = 16
   EVENT_PAYLOAD_OFFSET = 32
   EVENTS_RINGBUF_PAGES = 256
+  SPAN_ALLOWCLASSES = [
+    Socket,
+    BasicSocket,
+    IPSocket,
+    TCPSocket,
+    UDPSocket,
+    UNIXSocket,
+    File,
+    Dir,
+    Signal,
+    Process,
+    Process::UID,
+    Process::GID,
+  ]
   SPAN_ALLOWLIST = [
     "Kernel#system",
     "Kernel#require",
@@ -1577,10 +1591,14 @@ module Vivarium
   end
 
   def self.build_observe_tracepoint(method_id_queue)
+    allow_classes = SPAN_ALLOWCLASSES
     allowlist = SPAN_ALLOWLIST
     TracePoint.new(:call, :c_call, :return, :c_return) do |tp|
       signature = "#{tp.defined_class}##{tp.method_id}"
-      next unless allowlist.include?(signature)
+      is_target = allowlist.include?(signature) || \
+        allow_classes.any? { |klass| tp.defined_class == klass } || \
+        allow_classes.any? { |klass| tp.defined_class == klass.singleton_class }
+      next unless is_target
 
       case tp.event
       when :call, :c_call
