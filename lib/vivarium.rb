@@ -738,7 +738,6 @@ module Vivarium
         u64 pid_tgid = bpf_get_current_pid_tgid();
         u32 pid = pid_tgid >> 32;
         u32 tid = (u32)pid_tgid;
-        bpf_trace_printk("vivarium: invoked pid=%d\\n", pid);
         if (!target_enabled(pid, tid)) {
           return 0;
         }
@@ -752,11 +751,9 @@ module Vivarium
         if (path_ret < 0) {
           if (ev.payload[0] == 0) {
             __builtin_memcpy(ev.payload, "<path_error>", 13);
-            bpf_trace_printk("vivarium: failed to obtain full path. pid=%d path=%s\\n", pid, ev.payload);
           }
         }
 
-        bpf_trace_printk("vivarium: pid=%d path=%s\\n", pid, ev.payload);
         submit_event(&ev);
 
         return 0;
@@ -1362,7 +1359,6 @@ module Vivarium
       usdt.enable_probe(probe: "raise_probe", fn_name: "on_span_raise")
 
       bpf = RbBCC::BCC.new(text: program, usdt_contexts: [usdt])
-      kprint_thread = start_kprint_logger(bpf)
 
       config_root_targets = bpf["config_root_targets"]
       config_spawned_targets = bpf["config_spawned_targets"]
@@ -1378,18 +1374,12 @@ module Vivarium
       puts "[vivariumd] pinned maps in #{@pin_dir}"
       puts "[vivariumd] watching LSM file_open (f_path offset=#{f_path_offset})"
       puts "[vivariumd] USDT attached via #{usdt_so_path}"
-      puts "[vivariumd] kprint logger enabled"
 
       loop do
         sleep 1
       end
     rescue Interrupt
       puts "\n[vivariumd] stopping"
-    ensure
-      if kprint_thread
-        kprint_thread.kill
-        kprint_thread.join(0.2)
-      end
     end
 
     private
@@ -1403,26 +1393,6 @@ module Vivarium
     def pin_map(table, path)
       File.unlink(path) if File.exist?(path)
       RbBCC::BCC.pin!(table.map_fd, path)
-    end
-
-    def start_kprint_logger(bpf)
-      Thread.new do
-        begin
-          bpf.trace_fields do |_task, pid, _cpu, _flags, ts, msg|
-            line = msg.to_s.strip
-            next unless line.start_with?("vivarium:")
-
-            puts "[vivariumd:kprint #{ts} pid=#{pid}] #{line}"
-          end
-        rescue IOError, Errno::EINTR
-          nil
-        rescue StandardError => e
-          warn "[vivariumd] kprint stream stopped: #{e.class}: #{e.message}"
-        end
-      end
-    rescue StandardError => e
-      warn "[vivariumd] failed to start kprint logger: #{e.class}: #{e.message}"
-      nil
     end
 
     def detect_f_path_offset
@@ -1555,9 +1525,7 @@ module Vivarium
     end
   end
 
-  def self.observe(pin_dir: bpf_pin_dir, dest: $stdout, format: nil, logger: nil, &block)
-    _ = format
-    _ = logger
+  def self.observe(pin_dir: bpf_pin_dir, dest: $stdout, &block)
     return scoped_observe(pin_dir: pin_dir, dest: dest, &block) if block_given?
 
     top_observe(pin_dir: pin_dir, dest: dest)
