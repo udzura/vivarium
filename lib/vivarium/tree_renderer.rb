@@ -58,14 +58,21 @@ module Vivarium
     def render
       sorted = @events.sort_by { |e| [e.ktime_ns, e.pid, e.tid] }
 
-      real_spans = build_real_spans(sorted)
+      real_spans, @children_map = build_real_spans(sorted)
+      @child_span_set = @children_map.values.flatten.to_set
+
       assign_descendants(real_spans, sorted)
-      all_spans = interleave_synthetic_spans(real_spans)
-      assign_events_to_spans(all_spans, sorted)
+
+      root_real_spans = real_spans.reject { |s| @child_span_set.include?(s) }
+      root_with_synthetics = interleave_synthetic_spans(root_real_spans)
+
+      synthetic_spans = root_with_synthetics.select(&:synthetic)
+      all_spans_for_assign = (synthetic_spans + real_spans).sort_by { |s| s.start_ktime || 0 }
+      assign_events_to_spans(all_spans_for_assign, sorted)
 
       print_header
       print_warnings
-      print_observer_proc(all_spans)
+      print_observer_proc(root_with_synthetics)
     end
 
     private
@@ -73,6 +80,7 @@ module Vivarium
     def build_real_spans(events)
       open_by_tid = Hash.new { |h, k| h[k] = [] }
       closed = []
+      children_map = {}
 
       events.each do |ev|
         case ev.event_name
@@ -90,6 +98,8 @@ module Vivarium
             descendant_pids: Set.new,
             synthetic: false
           )
+          parent = open_by_tid[ev.tid].last
+          (children_map[parent] ||= []) << span if parent
           open_by_tid[ev.tid].push(span)
         when "span_stop", "span_raise"
           stack = open_by_tid[ev.tid]
@@ -111,7 +121,7 @@ module Vivarium
       end
 
       closed.sort_by!(&:start_ktime)
-      closed
+      [closed, children_map]
     end
 
     def assign_descendants(spans, events)
@@ -239,6 +249,7 @@ module Vivarium
     def print_observer_proc(spans)
       @dest.puts "[PROC pid=#{@observer_pid} comm=#{@pid_comm[@observer_pid] || 'ruby'}]"
       children = spans.reject { |s| s.synthetic && s.events.empty? }
+                      .reject { |s| @child_span_set.include?(s) }
       children.each_with_index do |span, idx|
         print_span(span, prefix: "", is_last: idx == children.size - 1)
       end
@@ -344,6 +355,20 @@ module Vivarium
         end
       end
 
+      # Interleave child spans by start time among the event/proc nodes
+      child_spans = (@children_map[span] || []).sort_by(&:start_ktime)
+      child_spans.each do |child_span|
+        child_offset = child_span.start_ktime - span.start_ktime
+        insert_pos = root_children.size
+        root_children.each_with_index do |node, i|
+          if node.is_a?(EventNode) && node.offset_ns >= child_offset
+            insert_pos = i
+            break
+          end
+        end
+        root_children.insert(insert_pos, child_span)
+      end
+
       root_children
     end
 
@@ -381,6 +406,8 @@ module Vivarium
           print_event_node(node, prefix: prefix, is_last: is_last)
         when ProcNode
           print_proc_node(node, prefix: prefix, is_last: is_last)
+        when Span
+          print_span(node, prefix: prefix, is_last: is_last)
         end
       end
     end
