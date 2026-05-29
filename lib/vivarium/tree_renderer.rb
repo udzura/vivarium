@@ -23,7 +23,7 @@ module Vivarium
     UNRESOLVED_METHOD_PREFIX = "<method_id="
 
     Span = Struct.new(
-      :tid, :method_id, :start_ktime, :stop_ktime, :exit_kind,
+      :tid, :method_id, :file_id, :lineno, :start_ktime, :stop_ktime, :exit_kind,
       :events, :descendant_pids, :synthetic,
       keyword_init: true
     ) do
@@ -77,10 +77,12 @@ module Vivarium
       events.each do |ev|
         case ev.event_name
         when "span_start"
-          mid = read_method_id(ev.payload)
+          mid, fid, lno = read_span_payload(ev.payload)
           span = Span.new(
             tid: ev.tid,
             method_id: mid,
+            file_id: fid,
+            lineno: lno,
             start_ktime: ev.ktime_ns,
             stop_ktime: nil,
             exit_kind: nil,
@@ -164,6 +166,8 @@ module Vivarium
       Span.new(
         tid: @main_tid,
         method_id: nil,
+        file_id: nil,
+        lineno: nil,
         start_ktime: start_ktime,
         stop_ktime: stop_ktime,
         exit_kind: :stopped,
@@ -251,12 +255,24 @@ module Vivarium
     def render_span_header(span)
       name = span_display_name(span)
       dur_text = format_duration(span.duration_ns)
+      file_info = span_file_info(span)
       suffix = case span.exit_kind
                when :raised then "  (raise)"
                when :dangling then "  (open)"
                else ""
                end
-      "[SPAN tid=#{span.tid} #{name}  dur=#{dur_text}#{suffix}]"
+      "[SPAN tid=#{span.tid} #{name}#{file_info}  dur=#{dur_text}#{suffix}]"
+    end
+
+    def span_file_info(span)
+      return "" if span.synthetic
+      return "" unless span.file_id && span.file_id != -1
+
+      file_name = Vivarium::Usdt.get_file_name(span.file_id)
+      return "" unless file_name
+
+      lno = span.lineno && span.lineno > 0 ? ":#{span.lineno}" : ""
+      "  at=#{File.basename(file_name)}#{lno}"
     end
 
     def span_display_name(span)
@@ -422,11 +438,14 @@ module Vivarium
       ms.abs < 1.0 ? format("%.1fus", ns / 1_000.0) : format("%.1fms", ms)
     end
 
-    def read_method_id(payload)
+    def read_span_payload(payload)
       bytes = payload.to_s.b
-      return 0 if bytes.bytesize < 8
+      return [0, -1, -1] if bytes.bytesize < 8
 
-      bytes[0, 8].unpack1("q<")
+      method_id = bytes[0, 8].unpack1("q<")
+      file_id = bytes.bytesize >= 16 ? bytes[8, 8].unpack1("q<") : -1
+      lineno = bytes.bytesize >= 24 ? bytes[16, 8].unpack1("q<") : -1
+      [method_id, file_id, lineno]
     end
 
     def read_proc_fork_child_pid(payload)
