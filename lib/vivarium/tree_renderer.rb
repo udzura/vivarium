@@ -32,6 +32,16 @@ module Vivarium
 
         stop_ktime - start_ktime
       end
+
+      # Span is mutable (stop_ktime, events, descendant_pids are written after creation).
+      # Use object identity for Hash/Set so keys remain stable across mutations.
+      def hash
+        object_id
+      end
+
+      def eql?(other)
+        equal?(other)
+      end
     end
 
     EventNode = Struct.new(:kind, :name, :target, :offset_ns, :child_proc, keyword_init: true)
