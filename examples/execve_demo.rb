@@ -9,6 +9,9 @@ require "vivarium"
 #   2) Run this script: bundle exec ruby examples/execve_demo.rb
 
 TMP_PREFIX = "vivarium-exec-demo"
+FILTER = {
+  include_events: %w[proc_exec]
+}.freeze
 
 def try_step(title)
   puts "[exec-demo] #{title}"
@@ -20,7 +23,7 @@ end
 Dir.mktmpdir(TMP_PREFIX, "/tmp") do |dir|
   output_path = File.join(dir, "execve-demo.out")
 
-  Vivarium.observe do
+  Vivarium.observe(filter: FILTER) do
     try_step("system echo with multiple args") do
       system("/bin/echo", "hello", "from", "vivarium", out: File::NULL)
     end

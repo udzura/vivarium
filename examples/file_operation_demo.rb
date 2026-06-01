@@ -10,6 +10,9 @@ require "vivarium"
 #   2) Run this script: bundle exec ruby examples/file_operation_demo.rb
 
 TMP_PREFIX = "vivarium-file-demo"
+FILTER = {
+  include_events: %w[path_open file_symlink file_hardlink file_rename file_chmod file_getdents]
+}.freeze
 
 def try_step(title)
   puts "[file-demo] #{title}"
@@ -24,7 +27,7 @@ Dir.mktmpdir(TMP_PREFIX, "/tmp") do |dir|
   hardlink_path = File.join(dir, "hardlink.txt")
   symlink_path = File.join(dir, "symlink.txt")
 
-  Vivarium.observe do
+  Vivarium.observe(filter: FILTER) do
     try_step("create source file") do
       File.write(source_path, "vivarium sample\n")
       File.read(source_path)

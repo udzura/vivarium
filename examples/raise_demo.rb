@@ -3,6 +3,10 @@
 
 require "vivarium"
 
+FILTER = {
+  include_events: %w[span_raise]
+}.freeze
+
 def try_step(title)
   puts "[priv-demo] #{title}"
   yield
@@ -10,7 +14,7 @@ rescue StandardError => e
   puts "[priv-demo] #{title} failed: #{e.class}: #{e.message}"
 end
 
-Vivarium.observe do
+Vivarium.observe(filter: FILTER) do
   try_step("raise in main") do
     raise "error in main"
   end

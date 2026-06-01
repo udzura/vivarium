@@ -3,6 +3,10 @@
 
 require "vivarium"
 
+FILTER = {
+  include_events: %w[task_kill]
+}.freeze
+
 # Usage:
 #   1) In another shell (root): sudo bundle exec vivariumd
 #   2) Run this script: bundle exec ruby examples/signal_kill_demo.rb
@@ -16,7 +20,7 @@ end
 
 child_pid = nil
 
-Vivarium.observe do
+Vivarium.observe(filter: FILTER) do
   try_step("fork child process") do
     child_pid = fork do
       trap("TERM") { exit!(0) }
