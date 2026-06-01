@@ -81,4 +81,44 @@ class VivariumDisplayFilterTest < Test::Unit::TestCase
     assert_equal true, by_regex.allow_span_name?("Net::HTTP#request")
     assert_equal false, by_regex.allow_span_name?("Kernel#system")
   end
+
+  test "filters payload by event name map" do
+    filter = Vivarium::DisplayFilter.compile(
+      payload: {
+        "path_open" => %r{^/etc/.*},
+        "dns_req" => /\.jp$/
+      }
+    )
+
+    assert_equal true, filter.needs_payload?
+
+    assert_equal true, filter.allow_event?(
+      event_name: "path_open",
+      severity: "medium",
+      span_name: "Kernel#system",
+      payload: "/etc/passwd"
+    )
+
+    assert_equal false, filter.allow_event?(
+      event_name: "path_open",
+      severity: "medium",
+      span_name: "Kernel#system",
+      payload: "/tmp/x"
+    )
+
+    assert_equal true, filter.allow_event?(
+      event_name: "dns_req",
+      severity: "medium",
+      span_name: "Kernel#system",
+      payload: "example.jp"
+    )
+
+    # Events without an event-specific payload rule remain unaffected.
+    assert_equal true, filter.allow_event?(
+      event_name: "proc_exec",
+      severity: "medium",
+      span_name: "Kernel#system",
+      payload: "filename=\"/bin/sh\""
+    )
+  end
 end

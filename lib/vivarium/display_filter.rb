@@ -28,7 +28,15 @@ module Vivarium
 
       @include_span_names = normalize_string_set(fetch_key(:include_span_names, :span_names))
       @span_pattern = normalize_pattern(fetch_key(:span, :span_pattern))
-      @payload_pattern = normalize_pattern(fetch_key(:payload, :payload_pattern))
+
+      payload_value = fetch_key(:payload)
+      @payload_pattern = normalize_pattern(fetch_key(:payload_pattern))
+      @payload_patterns_by_event = {}
+      if payload_value.is_a?(Hash)
+        @payload_patterns_by_event = normalize_payload_map(payload_value)
+      else
+        @payload_pattern ||= normalize_pattern(payload_value)
+      end
     end
 
     def enabled?
@@ -36,7 +44,7 @@ module Vivarium
     end
 
     def needs_payload?
-      !@payload_pattern.nil?
+      !@payload_pattern.nil? || !@payload_patterns_by_event.empty?
     end
 
     def allow_span_name?(span_name)
@@ -61,9 +69,10 @@ module Vivarium
       return false if !@include_pids.empty? && !@include_pids.include?(pid.to_i)
       return false if !@include_tids.empty? && !@include_tids.include?(tid.to_i)
 
-      if @payload_pattern
+      payload_pattern = @payload_patterns_by_event[name] || @payload_pattern
+      if payload_pattern
         return false if payload.nil?
-        return false unless @payload_pattern.match?(payload.to_s)
+        return false unless payload_pattern.match?(payload.to_s)
       end
 
       true
@@ -131,6 +140,18 @@ module Vivarium
         Regexp.new(Regexp.escape(value))
       else
         nil
+      end
+    end
+
+    def normalize_payload_map(raw_map)
+      raw_map.each_with_object({}) do |(event_name, pattern), out|
+        key = event_name.to_s.strip
+        next if key.empty?
+
+        normalized = normalize_pattern(pattern)
+        next unless normalized
+
+        out[key] = normalized
       end
     end
   end
