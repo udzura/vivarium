@@ -2,6 +2,7 @@
 
 require "fiddle"
 require "fileutils"
+require "net/http"
 require "optparse"
 require "pathname"
 require "rbbcc"
@@ -64,6 +65,7 @@ module Vivarium
     Process,
     Process::UID,
     Process::GID,
+    Net::HTTP,
   ]
   SPAN_ALLOWLIST = [
     "Kernel#system",
