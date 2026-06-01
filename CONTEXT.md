@@ -77,8 +77,14 @@ map and v1 deviations.
 - **Span** — One activation of a Ruby method on one thread. Identified
   by `(tid, method_id, start_ktime_ns)`. Delimited by:
   - **`span_start`** — emitted via `Vivarium::Usdt` `start_probe`.
-  - **`span_stop`** — emitted via `stop_probe` (normal return).
-  - **`span_raise`** — emitted via `raise_probe` (exceptional exit).
+  - **`span_stop`** — emitted via `stop_probe`. Fired on **both** normal
+    and exceptional returns (Ruby's `:return` / `:c_return` TracePoint
+    fires even when a method raises), so every Span is closed by exactly
+    one `span_stop`.
+  - **`span_raise`** — emitted via `raise_probe` on Ruby `:raise`. This
+    is an **event within a Span**, not a Span terminator: it sets a
+    `raised` flag on the innermost open Span on that tid and is also
+    rendered as an `EXCP` event line under that Span (§7.1).
   Spans may nest within a single tid.
 
 - **method_id** — 64-bit hash of `"#{defined_class}##{method_name}"`,
@@ -203,23 +209,25 @@ a Unix socket without changing message semantics.
 
 ### 5.6 Stack trace handling
 
-**Stack trace is dropped in v1.** The current implementation renders
-`caller_locations(...)` per drain
-(see [lib/vivarium/logger.rb](lib/vivarium/logger.rb)). The new
-architecture intentionally drops this; method context is preserved
-only through Span nesting in the Process Tree.
+**Multi-frame stack traces are dropped in v1.** The pre-v1
+`caller_locations(...)`-per-drain mechanism
+(see [lib/vivarium/logger.rb](lib/vivarium/logger.rb)) is intentionally
+not used; method context is preserved through Span nesting in the
+Process Tree.
 
-A future version will add per-Span `filename:lineno`. Two viable
-extension paths:
+**Per-Span `file:lineno` is implemented** via the originally proposed
+option **(b)**: the USDT probes carry a `(file_id, lineno)` argument
+pair (24-byte payload for `span_start`/`span_stop`, 32-byte for
+`span_raise` which adds `error_id`/`message_id`). `file_id` is
+hash-resolved by `Vivarium::Usdt.register_or_resolve_file`, parallel
+to `method_id`. Renderings:
 
-- **(a)** Capture `file:line` on the Main Thread at `start_probe` time
-  and send it through the same Queue/IPC channel as a second message
-  type.
-- **(b)** Extend the USDT probes to carry a `(file_id, line)`
-  argument pair, where `file_id` is hash-resolved similarly to
-  `method_id`.
+- Span headers include `at=basename.rb:N` when the file is known
+  (`TreeRenderer#span_file_info`).
+- `EXCP` event lines include `error=Class message="..." at=basename.rb:N`
+  (`TreeRenderer#render_raise_target`).
 
-Both are out of scope for v1.
+Option (a) (Queue-based delivery of file/line) was not adopted.
 
 ### 5.7 Threading scope (v1)
 
@@ -250,24 +258,43 @@ Concretely:
 The Main Thread fires Span USDTs from inside a `TracePoint` callback.
 
 - **TracePoint events listened:** `:call`, `:return`, `:c_call`,
-  `:c_return`. Both Ruby- and C-implemented methods are eligible, so
-  future allowlist entries are not constrained by implementation
+  `:c_return`, `:raise`. Both Ruby- and C-implemented methods are
+  eligible, so allowlist entries are not constrained by implementation
   language.
-- **Per-method allowlist:** the callback fires USDT probes only when
-  `"#{tp.defined_class}##{tp.method_id}"` matches a configured
-  allowlist. This is **mandatory** in v1 — an empty/missing allowlist
-  means no Spans, not "trace everything".
-- **v1 allowlist:** exactly one entry, `"Kernel#system"`. (Note: in
-  colloquial Ruby this is called `Object#system`, but `tp.defined_class`
-  returns the defining module, which is `Kernel`.)
+- **Per-method allowlist (call/return only):** for the call/return
+  events, the callback fires USDT probes only when the method matches
+  either:
+  - `SPAN_ALLOWLIST` — exact `"#{tp.defined_class}##{tp.method_id}"`
+    string match, or
+  - `SPAN_ALLOWCLASSES` — `tp.defined_class` is one of the listed
+    classes (or its singleton class, covering class-method calls).
+
+  This is **mandatory** for call/return — no match means no Span.
+- **v1 allowlist contents** (see [lib/vivarium.rb](lib/vivarium.rb)
+  `SPAN_ALLOWCLASSES` / `SPAN_ALLOWLIST`):
+  - Classes: `Socket`, `BasicSocket`, `IPSocket`, `TCPSocket`,
+    `UDPSocket`, `UNIXSocket`, `File`, `Dir`, `Signal`, `Process`,
+    `Process::UID`, `Process::GID`.
+  - Methods: `Kernel#system`, `Kernel#require`,
+    `Kernel#require_relative`, `Kernel#load`, `Kernel#eval`,
+    `Object#instance_eval`, `Object#instance_exec`.
 - **Mapping events → probes:**
-  - `:call` / `:c_call` → `Vivarium::Usdt.start(defined_class, method_id)`
-  - `:return` / `:c_return` → `Vivarium::Usdt.stop(defined_class, method_id)`
-- **`:raise` is not listened.** Consequently `raise_probe` is unused
-  in v1 — if a future allowlisted Ruby method exits via exception,
-  its Span will lack a `span_stop` and will dangle. Not a practical
-  issue for `Kernel#system`, which does not raise.
-- **Allowlist configuration mechanism:** hardcoded constant in v1.
+  - `:call` / `:c_call` → `Vivarium::Usdt.start(defined_class, method_id, file:, lineno:)`
+  - `:return` / `:c_return` → `Vivarium::Usdt.stop(defined_class, method_id, file:, lineno:)`
+  - `:raise` → `Vivarium::Usdt.raise(exception.class, exception.message, file:, lineno:)`
+- **`:raise` is unfiltered.** Unlike call/return, the `:raise` branch
+  does **not** consult the allowlist — every Ruby-level raise inside
+  the Observer process fires `raise_probe`. The probe is documented as
+  exception-safe at the `vivarium_usdt` layer, so a misbehaving
+  raise handler will not re-enter the TracePoint. Noise from third-
+  party libraries (e.g. internal `rescue`d exceptions) is accepted
+  for v1; filtering, if needed, will be added later.
+- **`:raise` does not close the Span.** Ruby's TracePoint fires both
+  `:raise` and the subsequent `:return` / `:c_return` for the raising
+  frame, so the span is still closed by `span_stop`; `span_raise` only
+  flags the Span with `raised=true` (rendered as `(raise)` suffix) and
+  appears as an `EXCP` event line within it.
+- **Allowlist configuration mechanism:** hardcoded constants in v1.
   A configuration API (`Vivarium.observe(methods: [...])`) is out of
   scope for v1.
 
@@ -435,18 +462,25 @@ Queue registration is processed). v1 handles this **lazily**:
 
 ## 6. Decisions still open
 
-1. **`raise_probe` rendering.** Not a v1 blocker (v1 does not fire
-   `raise_probe` — see §5.8). When `:raise` listening is added, a
-   Span that ended via `span_raise` will need a Format A rendering.
-   Proposal: replace `dur=Xms` with `raised=Xms` or append `(raise)`.
-
-2. **Backpressure.** What happens when `bpf_ringbuf_reserve` returns
+1. **Backpressure.** What happens when `bpf_ringbuf_reserve` returns
    NULL? Need a drop counter (a separate small map) and the Correlator
    should render `[DROPPED n]` markers in-tree at the point of loss.
 
-3. **`method_id` collisions.** Hash space is 64-bit; collisions are
+2. **`method_id` collisions.** Hash space is 64-bit; collisions are
    astronomically unlikely but not impossible. Proposal: ignore for
    v1, document.
+
+3. **Long-lived background children.** §5.10 assumes the allowlisted
+   method waits for its child (true for `Kernel#system`). With the
+   broader v1 allowlist (Process spawn, etc.) a Span may close while
+   its child is still alive, causing child events to land outside any
+   real Span and be absorbed by a synthetic `<no-span>` gap. Acceptable
+   for now; revisit if this becomes a usability issue.
+
+4. **`:raise` noise filtering.** `:raise` is currently unfiltered
+   (§5.8). If library-internal exceptions become a rendering nuisance
+   beyond what the `vivarium_usdt` exception-safety guarantee buffers,
+   reintroduce a defined-class denylist or an allowlist.
 
 ---
 
@@ -468,8 +502,10 @@ Queue registration is processed). v1 handles this **lazily**:
 | Format A renderer                   | [lib/vivarium/tree_renderer.rb](lib/vivarium/tree_renderer.rb)                                                    |
 | `gettid(2)` via Fiddle              | [lib/vivarium.rb](lib/vivarium.rb) — `Vivarium.gettid`                                                            |
 | `method_id` Queue + lazy resolve    | `Thread::Queue` created in `top_observe` / `scoped_observe`, drained by Correlator, resolved at render            |
-| `Kernel#system` allowlist           | [lib/vivarium.rb](lib/vivarium.rb) — `SPAN_ALLOWLIST = ["Kernel#system"].freeze`                                  |
-| TracePoint USDT firing              | [lib/vivarium.rb](lib/vivarium.rb) — `build_observe_tracepoint` (allowlisted `:call`/`:c_call`/`:return`/`:c_return`) |
+| Span allowlist (class + method)     | [lib/vivarium.rb](lib/vivarium.rb) — `SPAN_ALLOWCLASSES` (Socket/File/Dir/Signal/Process families) + `SPAN_ALLOWLIST` (Kernel#system/require/load/eval, Object#instance_eval/instance_exec) |
+| TracePoint USDT firing              | [lib/vivarium.rb](lib/vivarium.rb) — `build_observe_tracepoint` (`:call`/`:c_call`/`:return`/`:c_return` gated by allowlist; `:raise` unfiltered → `raise_probe`) |
+| `span_raise` payload + event render | [lib/vivarium.rb](lib/vivarium.rb) `decode_span_raise_payload` + [lib/vivarium/tree_renderer.rb](lib/vivarium/tree_renderer.rb) `render_raise_target` (EXCP kind, `(raise)` Span suffix) |
+| Per-Span `file:lineno`              | USDT probe args (24B start/stop, 32B raise) resolved via `Vivarium::Usdt.register_or_resolve_file`; rendered by `TreeRenderer#span_file_info` |
 
 ### 7.2 v1 deviations and pragmatic choices
 
