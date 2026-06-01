@@ -1626,7 +1626,6 @@ module Vivarium
     allowlist = SPAN_ALLOWLIST
     TracePoint.new(:call, :c_call, :return, :c_return, :raise) do |tp|
       if tp.event == :raise
-        next if RAISE_DENYLIST.any? { |klass| tp.defined_class <= klass }
         Vivarium::Usdt.raise(
           tp.raised_exception.class.to_s,
           tp.raised_exception.message.to_s,
@@ -1686,25 +1685,4 @@ module Vivarium
 
     Daemon.new(pin_dir: options[:pin_dir]).run
   end
-end
-
-require_relative "vivarium/correlator"
-require_relative "vivarium/tree_renderer"
-
-module Vivarium
-  RAISE_DENYLIST = [
-    # RbBCC internals
-    RbBCC::BCC,
-    RbBCC::Invoker,
-    RbBCC::Pointer,
-    RbBCC::SymbolCache,
-    RbBCC::TableBase,  # covers HashTable, ArrayTable, PerfEventArray, RingBuf, StackTrace
-    RbBCC::USDT,
-    # Vivarium internals
-    Vivarium::Daemon,
-    Vivarium::MapStore,
-    Vivarium::ObservationSession,
-    Vivarium::Correlator,
-    Vivarium::TreeRenderer,
-  ].freeze
 end
