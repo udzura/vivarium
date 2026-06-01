@@ -21,6 +21,7 @@ Implemented in this repository:
 - BPF LSM hooks on `inode_symlink`, `inode_link`, `inode_rename`, `path_chmod`
 - BPF tracepoint on `sys_enter_getdents64`
 - BPF tracepoint on `sys_enter_execve` (captures executable path and first few argv entries as `proc_exec`)
+- BPF tracepoint on `sched_process_fork` (tracks descendants and emits `proc_fork`)
 - BPF LSM hooks for suspicious behavior checks:
 	- `ptrace_access_check` (emits `ptrace_check`)
 	- `sb_mount` (emits `sb_mount`)
@@ -32,17 +33,18 @@ Implemented in this repository:
 - BPF LSM hook on `socket_create` (flags unusual socket creation as `odd_socket`)
 - BPF LSM hook on `socket_connect` (captures destination family/address/port as `sock_connect`)
 - BPF tracepoints on `sys_enter_sendmsg`, `sys_enter_sendto`, `sys_enter_sendmmsg` (capture UDP/53 DNS QNAME raw bytes as `dns_req`)
+- USDT probes for method span boundaries and exceptions (`span_start`, `span_stop`, `span_raise`)
+- OpenSSL `SSL_write` uprobe event (`ssl_write`)
 - Shared pinned maps on bpffs
 	- `config_root_targets` (root PID -> 0/1)
 	- `config_spawned_targets` (spawned TID -> 0/1)
-	- `event_invoked` (array length 1024 with `event_t` records)
-	- `event_write_pos` (cursor for appending into `event_invoked`)
+	- `events` (`BPF_RINGBUF_OUTPUT`, shared by system events and span events)
 - Ruby API `Vivarium.observe do ... end`
 	- Registers current PID to `config_root_targets`
 	- eBPF tracks spawned descendants into `config_spawned_targets` via `sched_process_fork`
-	- On each `:return` / `:c_return`, drains `event_invoked`
-	- Prints stack trace + events
-	- Clears event slots and cursor
+	- `TracePoint` emits span probes on allowlisted call/return and emits `span_raise` on Ruby `:raise`
+	- Correlator thread consumes ringbuf events and joins them to spans by `tid`/time window
+	- Renders a process tree once at session end
 	- Unregisters PID on block exit
 
 `event_t` currently:
@@ -51,6 +53,7 @@ Implemented in this repository:
 struct event_t {
 	u64 ktime_ns;
 	u32 pid;
+	u32 tid;
 	char event_name[16];
 	char payload[256];
 };
@@ -147,7 +150,7 @@ observer = Vivarium.top_observe
 observer.stop
 ```
 
-By default, Vivarium excludes its own internal frames from stack output. Set `VIVARIUM_FILTER_INTERNAL_FRAMES=0` to disable this filter.
+`Vivarium.observe` / `Vivarium.top_observe` produce one process-tree report at session end (block exit, `observer.stop`, or process exit).
 
 You can override pin directory via `VIVARIUM_BPF_PIN_DIR` on both sides:
 
@@ -179,17 +182,18 @@ bundle exec vivariumd --pin-dir /sys/fs/bpf/vivarium
 ## Notes
 
 - Thread/Ractor-awareness is not yet implemented.
-- `event_invoked` uses fixed 1024 slots and wraps around when full.
+- Current transport is ring buffer (`events`) pinned under bpffs.
+- Ring buffer is single-consumer by nature; v1 supports a single observer per host.
 - `payload` is 256 bytes in `event_t`; some event types intentionally use smaller structured slices inside that buffer.
 - `proc_exec` currently stores the executable path plus up to 3 argv entries in 4 fixed 64-byte slots to keep the BPF verifier happy.
+- `span_raise` is emitted on Ruby `:raise` and rendered as `EXCP` lines within the enclosing span.
+- Events that do not match any real span are grouped into synthetic `<no-span>` spans.
 - Each event is tagged with severity metadata: `high` for `setid_change`, `capable_check`, `bprm_creds`, `task_kill`, `ptrace_check`, `sb_mount`, and `kernel_read_file`; others are `medium` by default.
-- In `human` format output, `high` severity events are rendered in red.
 - `capable_check` is intentionally filtered to high-risk capabilities to reduce noise from extremely frequent `capable` hook calls.
-- Current output format is textual and intended for iteration.
+- Output format is textual process tree with a session header and per-span relative timing.
 - `vivariumd` resolves `struct file::f_path` offset from `/sys/kernel/btf/vmlinux` at startup.
 - `vivariumd` also resolves `struct dentry::d_name` offset from `/sys/kernel/btf/vmlinux` at startup.
 - You can override offsets manually with `VIVARIUM_FILE_F_PATH_OFFSET` and `VIVARIUM_DENTRY_D_NAME_OFFSET` if auto-detection fails.
-- `vivariumd` also prints `bpf_trace_printk` lines (`vivarium: pid=... path=...`) to its own logs.
 
 ## Contributing
 

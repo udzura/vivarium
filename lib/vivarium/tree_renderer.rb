@@ -1,12 +1,14 @@
 # frozen_string_literal: true
 
 require "set"
+require_relative "http_decoder"
 
 module Vivarium
   class TreeRenderer
     SPAN_EVENT_NAMES = %w[span_start span_stop].to_set.freeze
     FORK_EVENT_NAME = "proc_fork"
     EXEC_EVENT_NAME = "proc_exec"
+    SSL_WRITE_EVENT_NAME = "ssl_write"
 
     LSM_EVENT_NAMES = %w[
       path_open sock_connect odd_socket
@@ -18,6 +20,8 @@ module Vivarium
     TP_EVENT_NAMES = %w[
       dns_req proc_exec file_getdents proc_fork
     ].to_set.freeze
+
+    UPROBE_EVENT_NAMES = %w[ssl_write].to_set.freeze
 
     SYNTHETIC_SPAN_NAME = "<no-span>"
     UNRESOLVED_METHOD_PREFIX = "<method_id="
@@ -457,6 +461,7 @@ module Vivarium
     def kind_for(ev)
       return "EXCP" if ev.event_name == "span_raise"
       return "USDT" if SPAN_EVENT_NAMES.include?(ev.event_name)
+      return "SSL" if ev.event_name == SSL_WRITE_EVENT_NAME
       return "LSM" if LSM_EVENT_NAMES.include?(ev.event_name)
       return "TP" if TP_EVENT_NAMES.include?(ev.event_name)
 
@@ -465,10 +470,26 @@ module Vivarium
 
     def render_target(ev)
       return render_raise_target(ev) if ev.event_name == "span_raise"
+      return render_ssl_write_target(ev) if ev.event_name == SSL_WRITE_EVENT_NAME
 
       text = Vivarium.render_event_payload(ev).to_s
       text = text.gsub(/\s+/, " ").strip
       text.empty? ? "-" : text
+    end
+
+    def render_ssl_write_target(ev)
+      decoded = Vivarium.decode_ssl_write_payload(ev.payload)
+      http_decoder.render(
+        pid: ev.pid,
+        data: decoded[:data],
+        data_len: decoded[:data_len]
+      )
+    rescue StandardError => e
+      "ssl_write <decode-error: #{e.class}: #{e.message}>"
+    end
+
+    def http_decoder
+      @http_decoder ||= Vivarium::HttpDecoder.new
     end
 
     def render_raise_target(ev)

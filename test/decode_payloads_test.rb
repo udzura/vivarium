@@ -2,13 +2,7 @@
 
 require "test_helper"
 
-class VivariumTest < Test::Unit::TestCase
-  test "VERSION" do
-    assert do
-      ::Vivarium.const_defined?(:VERSION)
-    end
-  end
-
+class VivariumDecodePayloadsTest < Test::Unit::TestCase
   test "decode dns qname" do
     raw = "\x06google\x03com\x00".b.ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
     assert_equal "google.com", Vivarium.decode_dns_qname(raw)
@@ -136,21 +130,26 @@ class VivariumTest < Test::Unit::TestCase
     assert_match(/count=4096/, decoded)
   end
 
-  test "observe without block is supported" do
-    err = assert_raise(Vivarium::Error) do
-      Vivarium.observe(pin_dir: "/tmp/vivarium-not-found")
-    end
-    assert_match(/failed to open pinned maps/, err.message)
+  test "decode ssl_write payload" do
+    body = "GET /path HTTP/1.1\r\nHost: example.com\r\n\r\n".b
+    payload = [body.bytesize, body.bytesize].pack("L<L<") + body
+    payload = payload.ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
+
+    decoded = Vivarium.decode_ssl_write_payload(payload)
+    assert_equal body.bytesize, decoded[:data_len]
+    assert_equal body.bytesize, decoded[:cap_len]
+    assert_equal body, decoded[:data]
   end
 
-  test "top_observe exists" do
-    assert_respond_to Vivarium, :top_observe
-  end
+  test "decode ssl_write payload reports truncation through cap_len" do
+    full_len = 4096
+    captured = ("A" * 200).b
+    payload = [full_len, captured.bytesize].pack("L<L<") + captured
+    payload = payload.ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
 
-  test "map store raises readable error when pin is missing" do
-    err = assert_raise(Vivarium::Error) do
-      Vivarium::MapStore.new(pin_dir: "/tmp/vivarium-not-found")
-    end
-    assert_match(/failed to open pinned maps/, err.message)
+    decoded = Vivarium.decode_ssl_write_payload(payload)
+    assert_equal full_len, decoded[:data_len]
+    assert_equal captured.bytesize, decoded[:cap_len]
+    assert_equal captured, decoded[:data]
   end
 end
