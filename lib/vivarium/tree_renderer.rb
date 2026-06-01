@@ -4,7 +4,7 @@ require "set"
 
 module Vivarium
   class TreeRenderer
-    SPAN_EVENT_NAMES = %w[span_start span_stop span_raise].to_set.freeze
+    SPAN_EVENT_NAMES = %w[span_start span_stop].to_set.freeze
     FORK_EVENT_NAME = "proc_fork"
     EXEC_EVENT_NAME = "proc_exec"
 
@@ -24,7 +24,7 @@ module Vivarium
 
     Span = Struct.new(
       :tid, :method_id, :file_id, :lineno, :start_ktime, :stop_ktime, :exit_kind,
-      :events, :descendant_pids, :synthetic,
+      :events, :descendant_pids, :synthetic, :raised,
       keyword_init: true
     ) do
       def duration_ns
@@ -106,19 +106,23 @@ module Vivarium
             exit_kind: nil,
             events: [],
             descendant_pids: Set.new,
-            synthetic: false
+            synthetic: false,
+            raised: false
           )
           parent = open_by_tid[ev.tid].last
           (children_map[parent] ||= []) << span if parent
           open_by_tid[ev.tid].push(span)
-        when "span_stop", "span_raise"
+        when "span_stop"
           stack = open_by_tid[ev.tid]
           next if stack.empty?
 
           span = stack.pop
           span.stop_ktime = ev.ktime_ns
-          span.exit_kind = ev.event_name == "span_raise" ? :raised : :stopped
+          span.exit_kind = :stopped
           closed << span
+        when "span_raise"
+          span = open_by_tid[ev.tid].last
+          span.raised = true if span
         end
       end
 
@@ -193,7 +197,8 @@ module Vivarium
         exit_kind: :stopped,
         events: [],
         descendant_pids: Set.new,
-        synthetic: true
+        synthetic: true,
+        raised: false
       )
     end
 
@@ -277,10 +282,12 @@ module Vivarium
       name = span_display_name(span)
       dur_text = format_duration(span.duration_ns)
       file_info = span_file_info(span)
-      suffix = case span.exit_kind
-               when :raised then "  (raise)"
-               when :dangling then "  (open)"
-               else ""
+      suffix = if span.exit_kind == :dangling
+                 "  (open)"
+               elsif span.raised
+                 "  (raise)"
+               else
+                 ""
                end
       "[SPAN tid=#{span.tid} #{name}#{file_info}  dur=#{dur_text}#{suffix}]"
     end
@@ -448,6 +455,7 @@ module Vivarium
     end
 
     def kind_for(ev)
+      return "EXCP" if ev.event_name == "span_raise"
       return "USDT" if SPAN_EVENT_NAMES.include?(ev.event_name)
       return "LSM" if LSM_EVENT_NAMES.include?(ev.event_name)
       return "TP" if TP_EVENT_NAMES.include?(ev.event_name)
@@ -456,9 +464,38 @@ module Vivarium
     end
 
     def render_target(ev)
+      return render_raise_target(ev) if ev.event_name == "span_raise"
+
       text = Vivarium.render_event_payload(ev).to_s
       text = text.gsub(/\s+/, " ").strip
       text.empty? ? "-" : text
+    end
+
+    def render_raise_target(ev)
+      bytes = ev.payload.to_s.b
+      return "-" if bytes.bytesize < 8
+
+      error_id = bytes[0, 8].unpack1("q<")
+      message_id = bytes.bytesize >= 16 ? bytes[8, 8].unpack1("q<") : -1
+      file_id = bytes.bytesize >= 24 ? bytes[16, 8].unpack1("q<") : -1
+      lineno = bytes.bytesize >= 32 ? bytes[24, 8].unpack1("q<") : -1
+
+      error_name = Vivarium::Usdt.get_error_name(error_id) ||
+                   format("0x%016X", error_id & 0xFFFF_FFFF_FFFF_FFFF)
+
+      parts = ["error=#{error_name}"]
+
+      if message_id != -1
+        msg = Vivarium::Usdt.get_message_name(message_id)
+        parts << "message=#{msg.inspect}" if msg
+      end
+
+      if file_id != -1 && (file_name = Vivarium::Usdt.get_file_name(file_id))
+        lno = lineno && lineno > 0 ? ":#{lineno}" : ""
+        parts << "at=#{File.basename(file_name)}#{lno}"
+      end
+
+      parts.join(" ")
     end
 
     def format_duration(ns)

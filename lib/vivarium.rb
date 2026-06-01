@@ -342,6 +342,31 @@ module Vivarium
     result
   end
 
+  def self.decode_span_raise_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < 8
+
+    error_id = bytes[0, 8].unpack1("q<")
+    result = format("error_id=0x%016X", error_id & 0xFFFF_FFFF_FFFF_FFFF)
+
+    if bytes.bytesize >= 16
+      message_id = bytes[8, 8].unpack1("q<")
+      result += format(" message_id=0x%016X", message_id & 0xFFFF_FFFF_FFFF_FFFF)
+    end
+
+    if bytes.bytesize >= 24
+      file_id = bytes[16, 8].unpack1("q<")
+      result += format(" file_id=0x%016X", file_id & 0xFFFF_FFFF_FFFF_FFFF) if file_id != -1
+    end
+
+    if bytes.bytesize >= 32
+      lineno = bytes[24, 8].unpack1("q<")
+      result += " lineno=#{lineno}" if lineno > 0
+    end
+
+    result
+  end
+
   def self.render_event_payload(event)
     case event.event_name
     when "dns_req"
@@ -380,8 +405,11 @@ module Vivarium
     when "proc_fork"
       decoded = decode_proc_fork_payload(event.payload)
       decoded.empty? ? event.payload.inspect : decoded
-    when "span_start", "span_stop", "span_raise"
+    when "span_start", "span_stop"
       decoded = decode_span_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
+    when "span_raise"
+      decoded = decode_span_raise_payload(event.payload)
       decoded.empty? ? event.payload.inspect : decoded
     when "file_symlink"
       decoded = decode_file_symlink_payload(event.payload)
@@ -1322,18 +1350,21 @@ module Vivarium
         }
 
         u64 error_id = 0;
+        u64 message_id = 0;
         u64 file_id = 0;
         u64 lineno = 0;
         bpf_usdt_readarg(1, ctx, &error_id);
-        bpf_usdt_readarg(2, ctx, &file_id);
-        bpf_usdt_readarg(3, ctx, &lineno);
+        bpf_usdt_readarg(2, ctx, &message_id);
+        bpf_usdt_readarg(3, ctx, &file_id);
+        bpf_usdt_readarg(4, ctx, &lineno);
 
         struct event_t ev = {};
         ev.pid = pid;
         __builtin_memcpy(ev.event_name, "span_raise", 11);
         __builtin_memcpy(&ev.payload[0], &error_id, sizeof(error_id));
-        __builtin_memcpy(&ev.payload[8], &file_id, sizeof(file_id));
-        __builtin_memcpy(&ev.payload[16], &lineno, sizeof(lineno));
+        __builtin_memcpy(&ev.payload[8], &message_id, sizeof(message_id));
+        __builtin_memcpy(&ev.payload[16], &file_id, sizeof(file_id));
+        __builtin_memcpy(&ev.payload[24], &lineno, sizeof(lineno));
         submit_event(&ev);
         return 0;
       }
@@ -1593,7 +1624,17 @@ module Vivarium
   def self.build_observe_tracepoint(method_id_queue)
     allow_classes = SPAN_ALLOWCLASSES
     allowlist = SPAN_ALLOWLIST
-    TracePoint.new(:call, :c_call, :return, :c_return) do |tp|
+    TracePoint.new(:call, :c_call, :return, :c_return, :raise) do |tp|
+      if tp.event == :raise
+        Vivarium::Usdt.raise(
+          tp.raised_exception.class.to_s,
+          tp.raised_exception.message.to_s,
+          file: tp.path,
+          lineno: tp.lineno
+        )
+        next
+      end
+
       signature = "#{tp.defined_class}##{tp.method_id}"
       is_target = allowlist.include?(signature) || \
         allow_classes.any? { |klass| tp.defined_class == klass } || \
