@@ -10,6 +10,16 @@ class VivariumObservationApiTest < Test::Unit::TestCase
     assert_match(/failed to open pinned maps/, err.message)
   end
 
+  test "observe accepts filter keyword" do
+    err = assert_raise(Vivarium::Error) do
+      Vivarium.observe(
+        pin_dir: "/tmp/vivarium-not-found",
+        filter: { include_events: ["path_open"] }
+      )
+    end
+    assert_match(/failed to open pinned maps/, err.message)
+  end
+
   test "top_observe exists" do
     assert_respond_to Vivarium, :top_observe
   end

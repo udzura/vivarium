@@ -22,11 +22,12 @@ module Vivarium
 
     POLL_TIMEOUT_MS = 200
 
-    def initialize(pin_dir:, observer_pid:, main_tid:, method_id_queue:, dest: $stdout)
+    def initialize(pin_dir:, observer_pid:, main_tid:, method_id_queue:, filter: nil, dest: $stdout)
       @pin_dir = pin_dir
       @observer_pid = observer_pid
       @main_tid = main_tid
       @method_id_queue = method_id_queue
+      @filter = filter
       @dest = dest
 
       @events = []
@@ -79,6 +80,7 @@ module Vivarium
         session_start_ktime: @session_start_ktime,
         session_stop_iso: @session_stop_iso,
         session_stop_ktime: @session_stop_ktime,
+        filter: @filter,
         dest: @dest
       ).render
     end

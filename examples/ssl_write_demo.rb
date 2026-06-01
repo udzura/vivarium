@@ -5,6 +5,10 @@ require "net/http"
 require "uri"
 require "vivarium"
 
+FILTER = {
+  include_events: %w[ssl_write]
+}.freeze
+
 # Usage:
 #   1) In another shell (root): sudo bundle exec vivariumd
 #      (SSL_write uprobe is attached automatically when libssl is found)
@@ -13,7 +17,7 @@ require "vivarium"
 # You can disable the SSL_write uprobe with `sudo vivariumd --no-ssl-trace`
 # or point at a specific library with `sudo vivariumd --libssl /path/to/libssl.so.3`.
 
-Vivarium.observe do
+Vivarium.observe(filter: FILTER) do
   # Net::HTTP uses libssl's SSL_write under the hood. With HTTP/1.1 the
   # request line should appear verbatim in the SSL event payload.
   begin

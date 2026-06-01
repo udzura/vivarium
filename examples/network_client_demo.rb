@@ -4,6 +4,10 @@
 require "socket"
 require "vivarium"
 
+FILTER = {
+  include_events: %w[sock_connect dns_req odd_socket]
+}.freeze
+
 # Usage:
 #   1) In another shell (root): sudo bundle exec vivariumd
 #   2) Run this script: bundle exec ruby examples/network_client_demo.rb
@@ -15,7 +19,7 @@ rescue StandardError => e
   puts "[client] #{title} failed: #{e.class}: #{e.message}"
 end
 
-Vivarium.observe do
+Vivarium.observe(filter: FILTER) do
   # Likely emits sock_connect and dns_req via resolver traffic.
   try_step("system: DNS lookup") do
     system("getent hosts example.com >/dev/null 2>&1 || true")

@@ -1667,13 +1667,13 @@ module Vivarium
     end
   end
 
-  def self.observe(pin_dir: bpf_pin_dir, dest: $stdout, &block)
-    return scoped_observe(pin_dir: pin_dir, dest: dest, &block) if block_given?
+  def self.observe(pin_dir: bpf_pin_dir, dest: $stdout, filter: nil, &block)
+    return scoped_observe(pin_dir: pin_dir, dest: dest, filter: filter, &block) if block_given?
 
-    top_observe(pin_dir: pin_dir, dest: dest)
+    top_observe(pin_dir: pin_dir, dest: dest, filter: filter)
   end
 
-  def self.top_observe(pin_dir: bpf_pin_dir, dest: $stdout)
+  def self.top_observe(pin_dir: bpf_pin_dir, dest: $stdout, filter: nil)
     require "vivarium_usdt"
 
     store = MapStore.new(pin_dir: pin_dir)
@@ -1688,6 +1688,7 @@ module Vivarium
       observer_pid: pid,
       main_tid: main_tid,
       method_id_queue: method_id_queue,
+      filter: filter,
       dest: dest
     )
     correlator.start
@@ -1702,7 +1703,7 @@ module Vivarium
     session
   end
 
-  def self.scoped_observe(pin_dir:, dest:)
+  def self.scoped_observe(pin_dir:, dest:, filter: nil)
     require "vivarium_usdt"
 
     store = MapStore.new(pin_dir: pin_dir)
@@ -1717,6 +1718,7 @@ module Vivarium
       observer_pid: pid,
       main_tid: main_tid,
       method_id_queue: method_id_queue,
+      filter: filter,
       dest: dest
     )
     correlator.start
@@ -1813,4 +1815,5 @@ module Vivarium
 end
 
 require_relative "vivarium/correlator"
+require_relative "vivarium/display_filter"
 require_relative "vivarium/tree_renderer"

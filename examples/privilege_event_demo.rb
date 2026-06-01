@@ -3,6 +3,10 @@
 
 require "vivarium"
 
+FILTER = {
+  include_events: %w[setid_change capable_check bprm_creds]
+}.freeze
+
 # Usage:
 #   1) In another shell (root): sudo bundle exec vivariumd
 #   2) Run this script: bundle exec ruby examples/privilege_event_demo.rb
@@ -14,7 +18,7 @@ rescue StandardError => e
   puts "[priv-demo] #{title} failed: #{e.class}: #{e.message}"
 end
 
-Vivarium.observe do
+Vivarium.observe(filter: FILTER) do
   try_step("attempt setuid(0)") do
     Process::UID.change_privilege(0)
   end
