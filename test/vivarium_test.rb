@@ -136,6 +136,73 @@ class VivariumTest < Test::Unit::TestCase
     assert_match(/count=4096/, decoded)
   end
 
+  test "decode ssl_write payload" do
+    body = "GET /path HTTP/1.1\r\nHost: example.com\r\n\r\n".b
+    payload = [body.bytesize, body.bytesize].pack("L<L<") + body
+    payload = payload.ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
+
+    decoded = Vivarium.decode_ssl_write_payload(payload)
+    assert_equal body.bytesize, decoded[:data_len]
+    assert_equal body.bytesize, decoded[:cap_len]
+    assert_equal body, decoded[:data]
+  end
+
+  test "decode ssl_write payload reports truncation through cap_len" do
+    full_len = 4096
+    captured = ("A" * 200).b
+    payload = [full_len, captured.bytesize].pack("L<L<") + captured
+    payload = payload.ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
+
+    decoded = Vivarium.decode_ssl_write_payload(payload)
+    assert_equal full_len, decoded[:data_len]
+    assert_equal captured.bytesize, decoded[:cap_len]
+    assert_equal captured, decoded[:data]
+  end
+
+  test "http_decoder recognizes http/1.x request" do
+    require "vivarium/http_decoder"
+    decoder = Vivarium::HttpDecoder.new
+    body = "GET /path HTTP/1.1\r\nHost: example.com\r\n\r\n".b
+    result = decoder.render(pid: 1, data: body, data_len: body.bytesize)
+    assert_match(%r{http/1\.x request: GET /path HTTP/1\.1}, result)
+  end
+
+  test "http_decoder recognizes http/1.x response" do
+    require "vivarium/http_decoder"
+    decoder = Vivarium::HttpDecoder.new
+    body = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n".b
+    result = decoder.render(pid: 1, data: body, data_len: body.bytesize)
+    assert_match(%r{http/1\.x response: HTTP/1\.1 200 OK}, result)
+  end
+
+  test "http_decoder reports binary for non-http payload" do
+    require "vivarium/http_decoder"
+    decoder = Vivarium::HttpDecoder.new
+    body = "\xff\xfe\xaa\xbb".b
+    result = decoder.render(pid: 1, data: body, data_len: body.bytesize)
+    assert_match(/binary len=4/, result)
+  end
+
+  test "http_decoder detects http/2 preface and SETTINGS frame" do
+    require "vivarium/http_decoder"
+    decoder = Vivarium::HttpDecoder.new
+    preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".b
+    # SETTINGS: length=0, type=4, flags=0, stream=0
+    settings_frame = "\x00\x00\x00\x04\x00\x00\x00\x00\x00".b
+    body = preface + settings_frame
+    result = decoder.render(pid: 1, data: body, data_len: body.bytesize)
+    assert_match(/h2 preface/, result)
+    assert_match(/SETTINGS stream=0/, result)
+  end
+
+  test "http_decoder reports truncation when capture < data_len" do
+    require "vivarium/http_decoder"
+    decoder = Vivarium::HttpDecoder.new
+    body = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n".b
+    result = decoder.render(pid: 1, data: body, data_len: body.bytesize + 1000)
+    assert_match(/captured #{body.bytesize}\/#{body.bytesize + 1000}B/, result)
+  end
+
   test "observe without block is supported" do
     err = assert_raise(Vivarium::Error) do
       Vivarium.observe(pin_dir: "/tmp/vivarium-not-found")

@@ -30,6 +30,27 @@ module Vivarium
   EVENT_NAME_OFFSET = 16
   EVENT_PAYLOAD_OFFSET = 32
   EVENTS_RINGBUF_PAGES = 256
+
+  SSL_WRITE_PAYLOAD_DATA_LEN_OFFSET = 0
+  SSL_WRITE_PAYLOAD_CAP_LEN_OFFSET = 4
+  SSL_WRITE_PAYLOAD_DATA_OFFSET = 8
+  SSL_WRITE_PAYLOAD_DATA_MAX = EVENT_PAYLOAD_SIZE - SSL_WRITE_PAYLOAD_DATA_OFFSET
+
+  LIBSSL_SEARCH_PATHS = [
+    "/lib/x86_64-linux-gnu/libssl.so.3",
+    "/lib/x86_64-linux-gnu/libssl.so.1.1",
+    "/lib/aarch64-linux-gnu/libssl.so.3",
+    "/lib/aarch64-linux-gnu/libssl.so.1.1",
+    "/usr/lib/x86_64-linux-gnu/libssl.so.3",
+    "/usr/lib/x86_64-linux-gnu/libssl.so.1.1",
+    "/usr/lib/aarch64-linux-gnu/libssl.so.3",
+    "/usr/lib/aarch64-linux-gnu/libssl.so.1.1",
+    "/usr/lib64/libssl.so.3",
+    "/usr/lib64/libssl.so.1.1",
+    "/usr/lib/libssl.so.3",
+    "/usr/lib/libssl.so.1.1"
+  ].freeze
+
   SPAN_ALLOWCLASSES = [
     Socket,
     BasicSocket,
@@ -342,6 +363,17 @@ module Vivarium
     result
   end
 
+  def self.decode_ssl_write_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return { data_len: 0, cap_len: 0, data: "".b } if bytes.bytesize < SSL_WRITE_PAYLOAD_DATA_OFFSET
+
+    data_len = bytes[SSL_WRITE_PAYLOAD_DATA_LEN_OFFSET, 4].unpack1("L<")
+    cap_len = bytes[SSL_WRITE_PAYLOAD_CAP_LEN_OFFSET, 4].unpack1("L<")
+    cap_len = SSL_WRITE_PAYLOAD_DATA_MAX if cap_len > SSL_WRITE_PAYLOAD_DATA_MAX
+    data = bytes[SSL_WRITE_PAYLOAD_DATA_OFFSET, cap_len] || "".b
+    { data_len: data_len, cap_len: cap_len, data: data }
+  end
+
   def self.decode_span_raise_payload(raw_payload)
     bytes = raw_payload.to_s.b
     return "" if bytes.bytesize < 8
@@ -426,6 +458,9 @@ module Vivarium
     when "file_getdents"
       decoded = decode_file_getdents_payload(event.payload)
       decoded.empty? ? event.payload.inspect : decoded
+    when "ssl_write"
+      decoded = decode_ssl_write_payload(event.payload)
+      "data_len=#{decoded[:data_len]} cap_len=#{decoded[:cap_len]}"
     else
       strip_to_first_null(event.payload).inspect
     end
@@ -1339,6 +1374,42 @@ module Vivarium
         return 0;
       }
 
+      int on_ssl_write(struct pt_regs *ctx)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        const char *buf = (const char *)PT_REGS_PARM2(ctx);
+        int num = (int)PT_REGS_PARM3(ctx);
+        if (!buf || num <= 0) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "ssl_write", 10);
+
+        u32 data_len = (u32)num;
+        u32 cap = data_len;
+        if (cap > #{SSL_WRITE_PAYLOAD_DATA_MAX}) {
+          cap = #{SSL_WRITE_PAYLOAD_DATA_MAX};
+        }
+        __builtin_memcpy(&ev.payload[#{SSL_WRITE_PAYLOAD_DATA_LEN_OFFSET}], &data_len, sizeof(data_len));
+        __builtin_memcpy(&ev.payload[#{SSL_WRITE_PAYLOAD_CAP_LEN_OFFSET}], &cap, sizeof(cap));
+        if (bpf_probe_read_user(&ev.payload[#{SSL_WRITE_PAYLOAD_DATA_OFFSET}], cap, buf) < 0) {
+          u32 zero = 0;
+          __builtin_memcpy(&ev.payload[#{SSL_WRITE_PAYLOAD_CAP_LEN_OFFSET}], &zero, sizeof(zero));
+        }
+
+        submit_event(&ev);
+        return 0;
+      }
+
       int on_span_raise(struct pt_regs *ctx)
       {
         u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -1370,8 +1441,10 @@ module Vivarium
       }
     CLANG
 
-    def initialize(pin_dir: Vivarium.bpf_pin_dir)
+    def initialize(pin_dir: Vivarium.bpf_pin_dir, ssl_trace: true, libssl_path: nil)
       @pin_dir = pin_dir
+      @ssl_trace = ssl_trace
+      @libssl_path = libssl_path
     end
 
     def run
@@ -1391,6 +1464,8 @@ module Vivarium
       usdt.enable_probe(probe: "raise_probe", fn_name: "on_span_raise")
 
       bpf = RbBCC::BCC.new(text: program, usdt_contexts: [usdt])
+
+      attach_ssl_write_uprobe(bpf) if @ssl_trace
 
       config_root_targets = bpf["config_root_targets"]
       config_spawned_targets = bpf["config_spawned_targets"]
@@ -1415,6 +1490,39 @@ module Vivarium
     end
 
     private
+
+    def attach_ssl_write_uprobe(bpf)
+      path = resolve_libssl_path
+      unless path
+        warn "[vivariumd] libssl not found; SSL_write uprobe disabled " \
+             "(set --libssl PATH or VIVARIUM_LIBSSL_PATH to override)"
+        return
+      end
+
+      bpf.attach_uprobe(name: path, sym: "SSL_write", fn_name: "on_ssl_write")
+      puts "[vivariumd] SSL_write uprobe attached via #{path}"
+    rescue StandardError => e
+      warn "[vivariumd] SSL_write uprobe attach failed: #{e.class}: #{e.message}"
+    end
+
+    def resolve_libssl_path
+      if @libssl_path
+        return @libssl_path if File.exist?(@libssl_path)
+
+        warn "[vivariumd] --libssl path does not exist: #{@libssl_path}"
+        return nil
+      end
+
+      env_path = ENV["VIVARIUM_LIBSSL_PATH"]
+      if env_path && !env_path.empty?
+        return env_path if File.exist?(env_path)
+
+        warn "[vivariumd] VIVARIUM_LIBSSL_PATH does not exist: #{env_path}"
+        return nil
+      end
+
+      LIBSSL_SEARCH_PATHS.find { |p| File.exist?(p) }
+    end
 
     def ensure_root!
       return if Process.uid.zero?
@@ -1677,13 +1785,23 @@ module Vivarium
   end
 
   def self.run_daemon!(argv = ARGV)
-    options = { pin_dir: bpf_pin_dir }
+    options = { pin_dir: bpf_pin_dir, ssl_trace: true, libssl_path: nil }
     OptionParser.new do |opts|
-      opts.banner = "Usage: vivariumd [--pin-dir PATH]"
+      opts.banner = "Usage: vivariumd [--pin-dir PATH] [--no-ssl-trace] [--libssl PATH]"
       opts.on("--pin-dir PATH", "Pinned map directory") { |v| options[:pin_dir] = v }
+      opts.on("--[no-]ssl-trace", "Attach OpenSSL SSL_write uprobe (default: enabled)") do |v|
+        options[:ssl_trace] = v
+      end
+      opts.on("--libssl PATH", "Path to libssl.so to attach SSL_write to") do |v|
+        options[:libssl_path] = v
+      end
     end.parse!(argv)
 
-    Daemon.new(pin_dir: options[:pin_dir]).run
+    Daemon.new(
+      pin_dir: options[:pin_dir],
+      ssl_trace: options[:ssl_trace],
+      libssl_path: options[:libssl_path]
+    ).run
   end
 end
 
