@@ -53,7 +53,7 @@ module Vivarium
 
     def initialize(events:, method_table:, observer_pid:, main_tid:,
                    session_start_iso:, session_start_ktime:,
-                   session_stop_iso:, session_stop_ktime:, dest:)
+                   session_stop_iso:, session_stop_ktime:, filter: nil, dest:)
       @events = events
       @method_table = method_table
       @observer_pid = observer_pid
@@ -62,6 +62,7 @@ module Vivarium
       @session_start_ktime = session_start_ktime
       @session_stop_iso = session_stop_iso
       @session_stop_ktime = session_stop_ktime
+      @display_filter = Vivarium::DisplayFilter.compile(filter)
       @dest = dest
 
       @pid_comm = { observer_pid => "ruby" }
@@ -269,6 +270,7 @@ module Vivarium
       @dest.puts "[PROC pid=#{@observer_pid} comm=#{@pid_comm[@observer_pid] || 'ruby'}]"
       children = spans.reject { |s| s.synthetic && s.events.empty? }
                       .reject { |s| @child_span_set.include?(s) }
+                      .select { |s| span_visible?(s) }
       children.each_with_index do |span, idx|
         print_span(span, prefix: "", is_last: idx == children.size - 1)
       end
@@ -324,6 +326,14 @@ module Vivarium
       root_children = []
 
       span.events.each do |ev|
+        target_text = nil
+        if @display_filter.needs_payload?
+          target_text = render_target(ev)
+          next unless event_visible?(ev, span, target_text)
+        else
+          next unless event_visible?(ev, span)
+        end
+
         if ev.event_name == FORK_EVENT_NAME
           child_pid = read_proc_fork_child_pid(ev.payload)
           child_node = ProcNode.new(
@@ -337,7 +347,7 @@ module Vivarium
           ev_node = EventNode.new(
             kind: kind_for(ev),
             name: ev.event_name,
-            target: render_target(ev),
+            target: target_text || render_target(ev),
             offset_ns: ev.ktime_ns - span.start_ktime,
             child_proc: child_node
           )
@@ -348,7 +358,7 @@ module Vivarium
           ev_node = EventNode.new(
             kind: kind_for(ev),
             name: ev.event_name,
-            target: render_target(ev),
+            target: target_text || render_target(ev),
             offset_ns: ev.ktime_ns - span.start_ktime,
             child_proc: nil
           )
@@ -420,8 +430,12 @@ module Vivarium
     end
 
     def print_nodes(nodes, prefix)
-      nodes.each_with_index do |node, idx|
-        is_last = idx == nodes.size - 1
+      visible_nodes = nodes.select do |node|
+        !node.is_a?(Span) || span_visible?(node)
+      end
+
+      visible_nodes.each_with_index do |node, idx|
+        is_last = idx == visible_nodes.size - 1
         case node
         when EventNode
           print_event_node(node, prefix: prefix, is_last: is_last)
@@ -431,6 +445,21 @@ module Vivarium
           print_span(node, prefix: prefix, is_last: is_last)
         end
       end
+    end
+
+    def span_visible?(span)
+      @display_filter.allow_span_name?(span_display_name(span))
+    end
+
+    def event_visible?(ev, span, target_text = nil)
+      @display_filter.allow_event?(
+        event_name: ev.event_name,
+        severity: Vivarium.event_severity(ev.event_name),
+        span_name: span_display_name(span),
+        payload: target_text,
+        pid: ev.pid,
+        tid: ev.tid
+      )
     end
 
     def print_event_node(node, prefix:, is_last:)
