@@ -19,6 +19,23 @@ Vivarium.observe do
     eval("raise 'error in eval'")
   end
 
+  try_step("raise in nested eval") do
+    eval(<<~RUBY)
+      eval(<<~INNER_RUBY)
+        begin
+          eval(<<~INNER_INNER_RUBY)
+            puts "Hi"
+            raise "error in nested nested eval"
+          INNER_INNER_RUBY
+        rescue StandardError => _
+          puts "Rescued in nested eval"
+        end
+        File.open("/etc/hosts")
+      INNER_RUBY
+    RUBY
+  end
+
+
   try_step("raise in method") do
     File.open("notfound")
   end
