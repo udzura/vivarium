@@ -1736,6 +1736,11 @@ module Vivarium
     allowlist = SPAN_ALLOWLIST
     TracePoint.new(:call, :c_call, :return, :c_return, :raise) do |tp|
       if tp.event == :raise
+        # FIXME: handle threaded events in the future
+        if tp.raised_exception.kind_of?(ThreadError)
+          next
+        end
+
         Vivarium::Usdt.raise(
           tp.raised_exception.class.to_s,
           tp.raised_exception.message.to_s,

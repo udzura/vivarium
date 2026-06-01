@@ -1,5 +1,11 @@
 # frozen_string_literal: true
 
+begin
+  require "http/2"
+rescue LoadError
+  # http/2 gem is optional; without it we can still parse frame headers but not HPACK-decompress HEADERS.
+end
+
 module Vivarium
   # Decodes payloads captured from OpenSSL `SSL_write` into a human-readable
   # one-liner. Auto-detects HTTP/1.x request/response lines and HTTP/2 binary

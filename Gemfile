@@ -4,6 +4,7 @@ source "https://rubygems.org"
 
 # Specify your gem's dependencies in vivarium.gemspec
 gemspec
+gem "http-2"
 
 gem "irb"
 gem "rake", "~> 13.0"

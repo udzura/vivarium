@@ -17,7 +17,7 @@ Vivarium.observe do
   # Net::HTTP uses libssl's SSL_write under the hood. With HTTP/1.1 the
   # request line should appear verbatim in the SSL event payload.
   begin
-    uri = URI("https://example.com/")
+    uri = URI("https://udzura.jp/")
     Net::HTTP.start(uri.host, uri.port, use_ssl: true) do |http|
       http.get(uri.request_uri)
     end
