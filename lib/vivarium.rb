@@ -1686,3 +1686,6 @@ module Vivarium
     Daemon.new(pin_dir: options[:pin_dir]).run
   end
 end
+
+require_relative "vivarium/correlator"
+require_relative "vivarium/tree_renderer"
