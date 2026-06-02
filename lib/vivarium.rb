@@ -53,6 +53,16 @@ module Vivarium
     "/usr/lib/libssl.so.1.1"
   ].freeze
 
+  LIBC_SEARCH_PATHS = [
+    "/lib/x86_64-linux-gnu/libc.so.6",
+    "/lib/aarch64-linux-gnu/libc.so.6",
+    "/usr/lib/x86_64-linux-gnu/libc.so.6",
+    "/usr/lib/aarch64-linux-gnu/libc.so.6",
+    "/lib64/libc.so.6",
+    "/usr/lib64/libc.so.6",
+    "/lib/libc.so.6",
+  ].freeze
+
   SPAN_ALLOWCLASSES = [
     Socket,
     BasicSocket,
@@ -80,6 +90,7 @@ module Vivarium
   EVENT_SEVERITY_HIGH = %w[
     capable_check bprm_creds setid_change task_kill
     ptrace_check sb_mount kernel_read_file
+    dlopen
   ].freeze
 
   CAPABILITY_NAMES = {
@@ -464,6 +475,8 @@ module Vivarium
     when "ssl_write"
       decoded = decode_ssl_write_payload(event.payload)
       "data_len=#{decoded[:data_len]} cap_len=#{decoded[:cap_len]}"
+    when "dlopen", "mmap_exec"
+      strip_to_first_null(event.payload).inspect
     else
       strip_to_first_null(event.payload).inspect
     end
@@ -820,6 +833,39 @@ module Vivarium
 
         submit_event(&ev);
 
+        return 0;
+      }
+
+      LSM_PROBE(mmap_file, struct file *file, unsigned long reqprot,
+                unsigned long prot, unsigned long flags)
+      {
+        if (!file) {
+          return 0;
+        }
+        if (!((prot | reqprot) & 0x04)) {   /* PROT_EXEC */
+          return 0;
+        }
+
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        int path_ret;
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "mmap_exec", 10);
+
+        path_ret = bpf_d_path(&file->f_path, ev.payload, sizeof(ev.payload));
+        if (path_ret < 0) {
+          if (ev.payload[0] == 0) {
+            __builtin_memcpy(ev.payload, "<path_error>", 13);
+          }
+        }
+
+        submit_event(&ev);
         return 0;
       }
 
@@ -1428,6 +1474,32 @@ module Vivarium
         return 0;
       }
 
+      int on_dlopen(struct pt_regs *ctx)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        const char *filename = (const char *)PT_REGS_PARM1(ctx);
+        if (!filename) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "dlopen", 7);
+
+        if (bpf_probe_read_user_str(ev.payload, sizeof(ev.payload), filename) < 0) {
+          __builtin_memcpy(ev.payload, "<path_error>", 13);
+        }
+
+        submit_event(&ev);
+        return 0;
+      }
+
       int on_span_raise(struct pt_regs *ctx)
       {
         u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -1459,10 +1531,13 @@ module Vivarium
       }
     CLANG
 
-    def initialize(pin_dir: Vivarium.bpf_pin_dir, ssl_trace: true, libssl_path: nil)
-      @pin_dir = pin_dir
-      @ssl_trace = ssl_trace
-      @libssl_path = libssl_path
+    def initialize(pin_dir: Vivarium.bpf_pin_dir, ssl_trace: true, libssl_path: nil,
+                   dlopen_trace: true, libc_path: nil)
+      @pin_dir      = pin_dir
+      @ssl_trace    = ssl_trace
+      @libssl_path  = libssl_path
+      @dlopen_trace = dlopen_trace
+      @libc_path    = libc_path
     end
 
     def run
@@ -1485,6 +1560,7 @@ module Vivarium
       bpf = RbBCC::BCC.new(text: program, usdt_contexts: [usdt])
 
       attach_ssl_write_uprobe(bpf) if @ssl_trace
+      attach_dlopen_uprobe(bpf) if @dlopen_trace
 
       config_root_targets = bpf["config_root_targets"]
       config_spawned_targets = bpf["config_spawned_targets"]
@@ -1541,6 +1617,39 @@ module Vivarium
       end
 
       LIBSSL_SEARCH_PATHS.find { |p| File.exist?(p) }
+    end
+
+    def attach_dlopen_uprobe(bpf)
+      path = resolve_libc_path
+      unless path
+        warn "[vivariumd] libc not found; dlopen uprobe disabled " \
+             "(set --libc PATH or VIVARIUM_LIBC_PATH to override)"
+        return
+      end
+
+      bpf.attach_uprobe(name: path, sym: "dlopen", fn_name: "on_dlopen")
+      puts "[vivariumd] dlopen uprobe attached via #{path}"
+    rescue StandardError => e
+      warn "[vivariumd] dlopen uprobe attach failed: #{e.class}: #{e.message}"
+    end
+
+    def resolve_libc_path
+      if @libc_path
+        return @libc_path if File.exist?(@libc_path)
+
+        warn "[vivariumd] --libc path does not exist: #{@libc_path}"
+        return nil
+      end
+
+      env_path = ENV["VIVARIUM_LIBC_PATH"]
+      if env_path && !env_path.empty?
+        return env_path if File.exist?(env_path)
+
+        warn "[vivariumd] VIVARIUM_LIBC_PATH does not exist: #{env_path}"
+        return nil
+      end
+
+      LIBC_SEARCH_PATHS.find { |p| File.exist?(p) }
     end
 
     def ensure_root!
@@ -1811,9 +1920,11 @@ module Vivarium
   end
 
   def self.run_daemon!(argv = ARGV)
-    options = { pin_dir: bpf_pin_dir, ssl_trace: true, libssl_path: nil }
+    options = { pin_dir: bpf_pin_dir, ssl_trace: true, libssl_path: nil,
+                dlopen_trace: true, libc_path: nil }
     OptionParser.new do |opts|
-      opts.banner = "Usage: vivariumd [--pin-dir PATH] [--no-ssl-trace] [--libssl PATH]"
+      opts.banner = "Usage: vivariumd [--pin-dir PATH] [--no-ssl-trace] [--libssl PATH] " \
+                    "[--no-dlopen-trace] [--libc PATH]"
       opts.on("--pin-dir PATH", "Pinned map directory") { |v| options[:pin_dir] = v }
       opts.on("--[no-]ssl-trace", "Attach OpenSSL SSL_write uprobe (default: enabled)") do |v|
         options[:ssl_trace] = v
@@ -1821,12 +1932,20 @@ module Vivarium
       opts.on("--libssl PATH", "Path to libssl.so to attach SSL_write to") do |v|
         options[:libssl_path] = v
       end
+      opts.on("--[no-]dlopen-trace", "Attach libc dlopen uprobe (default: enabled)") do |v|
+        options[:dlopen_trace] = v
+      end
+      opts.on("--libc PATH", "Path to libc.so for dlopen uprobe") do |v|
+        options[:libc_path] = v
+      end
     end.parse!(argv)
 
     Daemon.new(
       pin_dir: options[:pin_dir],
       ssl_trace: options[:ssl_trace],
-      libssl_path: options[:libssl_path]
+      libssl_path: options[:libssl_path],
+      dlopen_trace: options[:dlopen_trace],
+      libc_path: options[:libc_path]
     ).run
   end
 end
