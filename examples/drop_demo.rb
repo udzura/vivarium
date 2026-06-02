@@ -14,6 +14,7 @@ require "vivarium"
 require "vivarium/correlator"
 require "vivarium/tree_renderer"
 require "vivarium/display_filter"
+require "vivarium_usdt"
 
 t0        = 1_000_000_000  # base ktime_ns
 pid       = Process.pid

@@ -1475,6 +1475,7 @@ module Vivarium
         .gsub("__VIVARIUM_F_PATH_OFFSET__", f_path_offset.to_s)
         .gsub("__VIVARIUM_DENTRY_D_NAME_OFFSET__", d_name_offset.to_s)
 
+      require "vivarium_usdt"
       usdt_so_path = ENV.fetch("VIVARIUM_USDT_SO_PATH") { Vivarium.locate_vivarium_usdt_so }
       usdt = RbBCC::USDT.new(path: usdt_so_path)
       usdt.enable_probe(probe: "start_probe", fn_name: "on_span_start")
