@@ -30,18 +30,21 @@ Vivarium.observe(filter: FILTER) do
     warn "[dlopen_demo] libm: #{e.message}"
   end
 
-  # libz: zlib compression — common on most Linux systems
+  # libsqlite3: a common library that may not be loaded at startup
   begin
-    libz = Fiddle.dlopen("libz.so.1")
-    puts "[dlopen_demo] libz loaded: zlibVersion = #{Fiddle::Function.new(libz["zlibVersion"], [], Fiddle::TYPE_VOIDP).call}"
-    libz.close
+    libsqlite3 = Fiddle.dlopen("libsqlite3.so.0")
+    puts "[dlopen_demo] libsqlite3 loaded: version = #{Fiddle::Function.new(libsqlite3["sqlite3_libversion"], [], Fiddle::TYPE_VOIDP).call}"
+    libsqlite3.close
   rescue Fiddle::DLError => e
-    warn "[dlopen_demo] libz: #{e.message}"
+    warn "[dlopen_demo] libsqlite3: #{e.message}"
   end
 
   # Spawn a child process that also calls dlopen — its events should
   # appear under a PROC node in the tree (descendant PID tracking).
-  system("ruby -e 'require \"fiddle\"; Fiddle.dlopen(\"libm.so.6\").close'")
+  # Unbundle so Bundler does not spawn anything.
+  Bundler.with_unbundled_env do
+    system("ruby -e 'require \"fiddle\"; Fiddle.dlopen(\"libm.so.6\").close'")
+  end
 end
 
 puts "[dlopen_demo] done"
