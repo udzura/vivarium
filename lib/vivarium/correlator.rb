@@ -6,7 +6,7 @@ require "time"
 module Vivarium
   class Correlator
     RawEvent = Struct.new(
-      :ktime_ns, :pid, :tid, :event_name, :payload,
+      :ktime_ns, :pid, :tid, :event_name, :payload, :dropped_since_last,
       keyword_init: true
     )
 
@@ -17,6 +17,7 @@ module Vivarium
         u32 tid;
         char event_name[16];
         char payload[256];
+        u64 dropped_since_last;
       };
     C
 
@@ -104,11 +105,12 @@ module Vivarium
       bytes = data[0, size].to_s.b
       bytes = bytes.ljust(Vivarium::EVENT_STRUCT_SIZE, "\x00") if bytes.bytesize < Vivarium::EVENT_STRUCT_SIZE
 
-      ktime_ns = bytes[Vivarium::EVENT_TS_OFFSET, Vivarium::EVENT_TS_SIZE].unpack1("Q<")
-      pid = bytes[Vivarium::EVENT_PID_OFFSET, 4].unpack1("L<")
-      tid = bytes[Vivarium::EVENT_TID_OFFSET, 4].unpack1("L<")
-      event_name = Vivarium.c_string(bytes[Vivarium::EVENT_NAME_OFFSET, Vivarium::EVENT_NAME_SIZE])
-      payload = bytes[Vivarium::EVENT_PAYLOAD_OFFSET, Vivarium::EVENT_PAYLOAD_SIZE].to_s.b
+      ktime_ns           = bytes[Vivarium::EVENT_TS_OFFSET,      Vivarium::EVENT_TS_SIZE].unpack1("Q<")
+      pid                = bytes[Vivarium::EVENT_PID_OFFSET,     4].unpack1("L<")
+      tid                = bytes[Vivarium::EVENT_TID_OFFSET,     4].unpack1("L<")
+      event_name         = Vivarium.c_string(bytes[Vivarium::EVENT_NAME_OFFSET, Vivarium::EVENT_NAME_SIZE])
+      payload            = bytes[Vivarium::EVENT_PAYLOAD_OFFSET, Vivarium::EVENT_PAYLOAD_SIZE].to_s.b
+      dropped_since_last = bytes[Vivarium::EVENT_DROPPED_OFFSET, 8].unpack1("Q<")
 
       @events_mutex.synchronize do
         @events << RawEvent.new(
@@ -116,7 +118,8 @@ module Vivarium
           pid: pid,
           tid: tid,
           event_name: event_name,
-          payload: payload
+          payload: payload,
+          dropped_since_last: dropped_since_last
         )
       end
     rescue StandardError => e
