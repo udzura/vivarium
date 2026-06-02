@@ -15,14 +15,14 @@ module Vivarium
       ptrace_check sb_mount kernel_read_file task_kill
       setid_change capable_check bprm_creds
       file_symlink file_hardlink file_rename file_chmod
-      mmap_exec
     ].to_set.freeze
 
     TP_EVENT_NAMES = %w[
       dns_req proc_exec file_getdents proc_fork
     ].to_set.freeze
 
-    UPROBE_EVENT_NAMES = %w[ssl_write dlopen].to_set.freeze
+    UPROBE_EVENT_NAMES = %w[ssl_write].to_set.freeze
+    DL_EVENT_NAMES = %w[dlopen mmap_exec].to_set.freeze
 
     SYNTHETIC_SPAN_NAME = "<no-span>"
     UNRESOLVED_METHOD_PREFIX = "<method_id="
@@ -515,7 +515,7 @@ module Vivarium
       return "EXCP" if ev.event_name == "span_raise"
       return "USDT" if SPAN_EVENT_NAMES.include?(ev.event_name)
       return "SSL" if ev.event_name == SSL_WRITE_EVENT_NAME
-      return "UPR" if UPROBE_EVENT_NAMES.include?(ev.event_name)
+      return "DL" if DL_EVENT_NAMES.include?(ev.event_name)
       return "LSM" if LSM_EVENT_NAMES.include?(ev.event_name)
       return "TP" if TP_EVENT_NAMES.include?(ev.event_name)
 
