@@ -324,6 +324,7 @@ module Vivarium
     def build_span_children(span)
       proc_node_by_pid = {}
       root_children = []
+      prev_event_ktime = span.start_ktime
 
       span.events.each do |ev|
         target_text = nil
@@ -353,6 +354,7 @@ module Vivarium
           )
 
           parent_container = container_for_pid(ev.pid, span, proc_node_by_pid, root_children)
+          maybe_inject_drop_node(parent_container, ev, span, prev_event_ktime)
           append_event(parent_container, ev_node)
         else
           ev_node = EventNode.new(
@@ -363,12 +365,11 @@ module Vivarium
             child_proc: nil
           )
 
-          if ev.pid == @observer_pid && ev.tid == span.tid
-            append_event(root_children, ev_node)
+          container = if ev.pid == @observer_pid && ev.tid == span.tid
+            root_children
           elsif (node = proc_node_by_pid[ev.pid])
-            append_event(node.children, ev_node)
+            node.children
           else
-            # event from a descendant pid we haven't materialized — synthesize a stub PROC node
             stub = ProcNode.new(
               pid: ev.pid,
               comm: @pid_comm[ev.pid] || "?",
@@ -376,14 +377,19 @@ module Vivarium
               children: []
             )
             proc_node_by_pid[ev.pid] = stub
-            append_event(stub.children, ev_node)
             root_children << stub
+            stub.children
           end
+
+          maybe_inject_drop_node(container, ev, span, prev_event_ktime)
+          append_event(container, ev_node)
 
           if ev.event_name == EXEC_EVENT_NAME && (node = proc_node_by_pid[ev.pid])
             node.comm = @pid_comm[ev.pid] || node.comm
           end
         end
+
+        prev_event_ktime = ev.ktime_ns
       end
 
       # Interleave child spans by start time among the event/proc nodes
@@ -427,6 +433,23 @@ module Vivarium
 
     def append_event(container, ev_node)
       container << ev_node
+    end
+
+    def maybe_inject_drop_node(container, ev, span, prev_event_ktime = nil)
+      n = ev.dropped_since_last.to_i
+      return if n.zero?
+
+      # Show the start of the drop window (= time of last good event).
+      # The end is implicitly ev.ktime_ns (shown on the following event line).
+      drop_start_ns = prev_event_ktime ? (prev_event_ktime - span.start_ktime) : nil
+
+      container << EventNode.new(
+        kind: "DROP",
+        name: "dropped_events",
+        target: "#{n} event(s) lost (ringbuf overflow)",
+        offset_ns: drop_start_ns,
+        child_proc: nil
+      )
     end
 
     def print_nodes(nodes, prefix)

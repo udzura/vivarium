@@ -24,12 +24,13 @@ module Vivarium
   EVENT_TS_SIZE = 8
   PROC_EXEC_SLOT_SIZE = 64
   PROC_EXEC_SLOT_COUNT = 4
-  EVENT_STRUCT_SIZE = 288
+  EVENT_STRUCT_SIZE = 296
   EVENT_TS_OFFSET = 0
   EVENT_PID_OFFSET = 8
   EVENT_TID_OFFSET = 12
   EVENT_NAME_OFFSET = 16
   EVENT_PAYLOAD_OFFSET = 32
+  EVENT_DROPPED_OFFSET = 288
   EVENTS_RINGBUF_PAGES = 256
 
   SSL_WRITE_PAYLOAD_DATA_LEN_OFFSET = 0
@@ -619,12 +620,14 @@ module Vivarium
         u32 tid;
         char event_name[16];
         char payload[#{EVENT_PAYLOAD_SIZE}];
+        u64 dropped_since_last;
       };
 
       BPF_HASH(config_root_targets, u32, u8, 1024);
       BPF_HASH(config_spawned_targets, u32, u8, 8192);
       BPF_HASH(dns_connected_tids, u32, u8, 8192);
       BPF_RINGBUF_OUTPUT(events, #{EVENTS_RINGBUF_PAGES});
+      BPF_ARRAY(drop_counter, u64, 1);
 
       static __always_inline int target_enabled(u32 pid, u32 tid)
       {
@@ -666,14 +669,27 @@ module Vivarium
 
       static __always_inline void submit_event(struct event_t *src)
       {
+        u32 key = 0;
+        u64 *cnt;
+
         struct event_t *ev = events.ringbuf_reserve(sizeof(struct event_t));
         if (!ev) {
+          cnt = drop_counter.lookup(&key);
+          if (cnt) {
+            __sync_fetch_and_add(cnt, 1);
+          }
           return;
         }
 
         __builtin_memcpy(ev, src, sizeof(*ev));
         ev->ktime_ns = bpf_ktime_get_ns();
         ev->tid = (u32)bpf_get_current_pid_tgid();
+        ev->dropped_since_last = 0;
+
+        cnt = drop_counter.lookup(&key);
+        if (cnt && *cnt > 0) {
+          ev->dropped_since_last = __sync_lock_test_and_set(cnt, 0);
+        }
 
         events.ringbuf_submit(ev, 0);
       }
@@ -1459,6 +1475,7 @@ module Vivarium
         .gsub("__VIVARIUM_F_PATH_OFFSET__", f_path_offset.to_s)
         .gsub("__VIVARIUM_DENTRY_D_NAME_OFFSET__", d_name_offset.to_s)
 
+      require "vivarium_usdt"
       usdt_so_path = ENV.fetch("VIVARIUM_USDT_SO_PATH") { Vivarium.locate_vivarium_usdt_so }
       usdt = RbBCC::USDT.new(path: usdt_so_path)
       usdt.enable_probe(probe: "start_probe", fn_name: "on_span_start")
