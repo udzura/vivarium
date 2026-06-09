@@ -1,4 +1,10 @@
 PATH
+  remote: ../vivarium_usdt
+  specs:
+    vivarium_usdt (0.3.0)
+      rb_sys (~> 0.9.91)
+
+PATH
   remote: .
   specs:
     vivarium (0.3.2)
@@ -43,8 +49,6 @@ GEM
     test-unit (3.7.7)
       power_assert
     tsort (0.2.0)
-    vivarium_usdt (0.3.0)
-      rb_sys (~> 0.9.91)
 
 PLATFORMS
   arm64-darwin-25
@@ -57,7 +61,7 @@ DEPENDENCIES
   rake (~> 13.0)
   test-unit (~> 3.0)
   vivarium!
-  vivarium_usdt (~> 0.1)
+  vivarium_usdt!
 
 CHECKSUMS
   date (3.5.1) sha256=750d06384d7b9c15d562c76291407d89e368dda4d4fff957eb94962d325a0dc0
@@ -82,7 +86,7 @@ CHECKSUMS
   test-unit (3.7.7) sha256=3c89d5ff0690a16bef9946156c4624390402b9d54dfcf4ce9cbd5b06bead1e45
   tsort (0.2.0) sha256=9650a793f6859a43b6641671278f79cfead60ac714148aabe4e3f0060480089f
   vivarium (0.3.2)
-  vivarium_usdt (0.3.0) sha256=c5c1bbadf26088f86ddf46d4afd3d6a4782e2cb7b4465ef0d12fbc7c60fe9243
+  vivarium_usdt (0.3.0)
 
 BUNDLED WITH
   4.0.6
