@@ -11,5 +11,4 @@ gem "rake", "~> 13.0"
 
 gem "test-unit", "~> 3.0"
 
-# gem "vivarium_usdt", "~> 0.1"
-gem "vivarium_usdt", path: "../vivarium_usdt"
+gem "vivarium_usdt", "~> 0.4"

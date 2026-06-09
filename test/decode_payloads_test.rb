@@ -8,6 +8,14 @@ class VivariumDecodePayloadsTest < Test::Unit::TestCase
     assert_equal "google.com", Vivarium.decode_dns_qname(raw)
   end
 
+  test "tail fit string keeps suffix" do
+    value = "/very/long/path/to/project/lib/some/deeply/nested/file_name.rb"
+    trimmed = Vivarium.tail_fit_string(value, 20)
+
+    assert_equal 20, trimmed.bytesize
+    assert_match(/file_name\.rb\z/, trimmed)
+  end
+
   test "decode proc_exec payload" do
     payload = "/bin/sh".ljust(Vivarium::PROC_EXEC_SLOT_SIZE, "\x00") +
               "sh".ljust(Vivarium::PROC_EXEC_SLOT_SIZE, "\x00") +

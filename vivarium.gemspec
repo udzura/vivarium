@@ -32,6 +32,6 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
 
   spec.add_dependency "rbbcc", "~> 0.11.8"
-  spec.add_dependency "vivarium_usdt", "~> 0.3.0"
+  spec.add_dependency "vivarium_usdt", "~> 0.4.0"
   spec.add_development_dependency "ostruct"
 end

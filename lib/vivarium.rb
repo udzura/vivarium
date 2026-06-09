@@ -36,9 +36,11 @@ module Vivarium
   SPAN_METHOD_SIZE     = 128
   SPAN_FILE_SIZE       = 120
   SPAN_LINENO_OFFSET   = SPAN_METHOD_SIZE + SPAN_FILE_SIZE  # 248
+  SPAN_FILE_ARG_MAX    = SPAN_FILE_SIZE - 1
 
   SPAN_RAISE_SLOT_SIZE     = 80
   SPAN_RAISE_LINENO_OFFSET = SPAN_RAISE_SLOT_SIZE * 3        # 240
+  SPAN_RAISE_FILE_ARG_MAX  = SPAN_RAISE_SLOT_SIZE - 1
 
   SSL_WRITE_PAYLOAD_DATA_LEN_OFFSET = 0
   SSL_WRITE_PAYLOAD_CAP_LEN_OFFSET = 4
@@ -154,6 +156,16 @@ module Vivarium
     return str if nul.nil?
 
     str[0, nul]
+  end
+
+  def self.tail_fit_string(value, max_bytes, marker: "...")
+    str = value.to_s.b
+    return str if str.bytesize <= max_bytes
+    return str.byteslice(-max_bytes, max_bytes) || "" if max_bytes <= marker.bytesize
+
+    tail_size = max_bytes - marker.bytesize
+    tail = str.byteslice(-tail_size, tail_size) || ""
+    "#{marker}#{tail}"
   end
 
   def self.event_severity(event_name)
@@ -1870,10 +1882,11 @@ module Vivarium
         # FIXME: handle threaded events in the future
         next if tp.raised_exception.kind_of?(ThreadError)
 
+        file_arg = tail_fit_string(tp.path, SPAN_RAISE_FILE_ARG_MAX)
         Vivarium::Usdt.raise(
           tp.raised_exception.class.to_s,
           tp.raised_exception.message.to_s,
-          file: tp.path,
+          file: file_arg,
           lineno: tp.lineno
         )
         next
@@ -1885,11 +1898,12 @@ module Vivarium
         allow_classes.any? { |klass| tp.defined_class == klass.singleton_class }
       next unless is_target
 
+      file_arg = tail_fit_string(tp.path, SPAN_FILE_ARG_MAX)
       case tp.event
       when :call, :c_call
-        Vivarium::Usdt.start(tp.defined_class.to_s, tp.method_id.to_s, file: tp.path, lineno: tp.lineno)
+        Vivarium::Usdt.start(tp.defined_class.to_s, tp.method_id.to_s, file: file_arg, lineno: tp.lineno)
       when :return, :c_return
-        Vivarium::Usdt.stop(tp.defined_class.to_s, tp.method_id.to_s, file: tp.path, lineno: tp.lineno)
+        Vivarium::Usdt.stop(tp.defined_class.to_s, tp.method_id.to_s, file: file_arg, lineno: tp.lineno)
       end
     end
   end
