@@ -14,16 +14,15 @@ require "vivarium"
 require "vivarium/correlator"
 require "vivarium/tree_renderer"
 require "vivarium/display_filter"
-require "vivarium_usdt"
 
-t0        = 1_000_000_000  # base ktime_ns
-pid       = Process.pid
-tid       = Process.pid
-method_id = 0x0001_0001
+t0  = 1_000_000_000  # base ktime_ns
+pid = Process.pid
+tid = Process.pid
 
-# span_start payload: method_id (8B) + file_id (8B) + lineno (8B)
-span_start_payload = [method_id, 0, 10].pack("q<q<q<")
-                                        .ljust(Vivarium::EVENT_PAYLOAD_SIZE, "\x00")
+# span_start payload: method_name (128B) + file_name (120B) + lineno (8B)
+span_start_payload = "MyClass#my_method".ljust(Vivarium::SPAN_METHOD_SIZE, "\x00") +
+                     "drop_demo.rb".ljust(Vivarium::SPAN_FILE_SIZE, "\x00") +
+                     [10].pack("q<")
 
 events = [
   Vivarium::Correlator::RawEvent.new(
@@ -67,7 +66,6 @@ events = [
 
 Vivarium::TreeRenderer.new(
   events: events,
-  method_table: { method_id => "MyClass#my_method" },
   observer_pid: pid,
   main_tid: tid,
   session_start_iso: "2026-06-02T00:00:00.000Z",

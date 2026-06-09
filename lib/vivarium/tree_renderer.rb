@@ -28,7 +28,7 @@ module Vivarium
     UNRESOLVED_METHOD_PREFIX = "<method_id="
 
     Span = Struct.new(
-      :tid, :method_id, :file_id, :lineno, :start_ktime, :stop_ktime, :exit_kind,
+      :tid, :method_name, :file_name, :lineno, :start_ktime, :stop_ktime, :exit_kind,
       :events, :descendant_pids, :synthetic, :raised,
       keyword_init: true
     ) do
@@ -52,11 +52,10 @@ module Vivarium
     EventNode = Struct.new(:kind, :name, :target, :offset_ns, :child_proc, keyword_init: true)
     ProcNode = Struct.new(:pid, :comm, :parent_pid, :children, keyword_init: true)
 
-    def initialize(events:, method_table:, observer_pid:, main_tid:,
+    def initialize(events:, observer_pid:, main_tid:,
                    session_start_iso:, session_start_ktime:,
                    session_stop_iso:, session_stop_ktime:, filter: nil, dest:)
       @events = events
-      @method_table = method_table
       @observer_pid = observer_pid
       @main_tid = main_tid
       @session_start_iso = session_start_iso
@@ -68,7 +67,6 @@ module Vivarium
 
       @pid_comm = { observer_pid => "ruby" }
       @pid_parent = {}
-      @unresolved_method_ids = []
     end
 
     def render
@@ -101,11 +99,11 @@ module Vivarium
       events.each do |ev|
         case ev.event_name
         when "span_start"
-          mid, fid, lno = read_span_payload(ev.payload)
+          method_name, file_name, lno = read_span_payload(ev.payload)
           span = Span.new(
             tid: ev.tid,
-            method_id: mid,
-            file_id: fid,
+            method_name: method_name,
+            file_name: file_name,
             lineno: lno,
             start_ktime: ev.ktime_ns,
             stop_ktime: nil,
@@ -195,8 +193,8 @@ module Vivarium
     def synthetic_span(start_ktime, stop_ktime)
       Span.new(
         tid: @main_tid,
-        method_id: nil,
-        file_id: nil,
+        method_name: nil,
+        file_name: nil,
         lineno: nil,
         start_ktime: start_ktime,
         stop_ktime: stop_ktime,
@@ -262,9 +260,6 @@ module Vivarium
     end
 
     def print_warnings
-      @unresolved_method_ids.uniq.each do |mid|
-        @dest.puts format("# warning method_id=0x%016X unresolved at render time", mid & 0xFFFF_FFFF_FFFF_FFFF)
-      end
     end
 
     def print_observer_proc(spans)
@@ -301,25 +296,17 @@ module Vivarium
 
     def span_file_info(span)
       return "" if span.synthetic
-      return "" unless span.file_id && span.file_id != -1
-
-      file_name = Vivarium::Usdt.get_file_name(span.file_id)
-      return "" unless file_name
+      return "" if span.file_name.nil? || span.file_name.empty?
 
       lno = span.lineno && span.lineno > 0 ? ":#{span.lineno}" : ""
-      "  at=#{File.basename(file_name)}#{lno}"
+      "  at=#{File.basename(span.file_name)}#{lno}"
     end
 
     def span_display_name(span)
       return SYNTHETIC_SPAN_NAME if span.synthetic
-      return SYNTHETIC_SPAN_NAME if span.method_id.nil?
+      return SYNTHETIC_SPAN_NAME if span.method_name.nil? || span.method_name.empty?
 
-      name = @method_table[span.method_id]
-      name ||= Vivarium::Usdt.get_method_name(span.method_id)
-      return name if name
-
-      @unresolved_method_ids << span.method_id
-      format("#{UNRESOLVED_METHOD_PREFIX}0x%016X>", span.method_id & 0xFFFF_FFFF_FFFF_FFFF)
+      span.method_name
     end
 
     def build_span_children(span)
@@ -548,28 +535,20 @@ module Vivarium
 
     def render_raise_target(ev)
       bytes = ev.payload.to_s.b
-      return "-" if bytes.bytesize < 8
+      return "-" if bytes.empty?
 
-      error_id = bytes[0, 8].unpack1("q<")
-      message_id = bytes.bytesize >= 16 ? bytes[8, 8].unpack1("q<") : -1
-      file_id = bytes.bytesize >= 24 ? bytes[16, 8].unpack1("q<") : -1
-      lineno = bytes.bytesize >= 32 ? bytes[24, 8].unpack1("q<") : -1
+      slot = Vivarium::SPAN_RAISE_SLOT_SIZE
+      error_name = Vivarium.c_string(bytes[0, slot])
+      message    = Vivarium.c_string(bytes[slot, slot])
+      file_name  = Vivarium.c_string(bytes[slot * 2, slot])
+      lineno     = bytes.bytesize > Vivarium::SPAN_RAISE_LINENO_OFFSET ? bytes[Vivarium::SPAN_RAISE_LINENO_OFFSET, 8].unpack1("q<") : -1
 
-      error_name = Vivarium::Usdt.get_error_name(error_id) ||
-                   format("0x%016X", error_id & 0xFFFF_FFFF_FFFF_FFFF)
-
-      parts = ["error=#{error_name}"]
-
-      if message_id != -1
-        msg = Vivarium::Usdt.get_message_name(message_id)
-        parts << "message=#{msg.inspect}" if msg
-      end
-
-      if file_id != -1 && (file_name = Vivarium::Usdt.get_file_name(file_id))
-        lno = lineno && lineno > 0 ? ":#{lineno}" : ""
+      parts = ["error=#{error_name.empty? ? '?' : error_name}"]
+      parts << "message=#{message.inspect}" unless message.empty?
+      unless file_name.empty?
+        lno = lineno > 0 ? ":#{lineno}" : ""
         parts << "at=#{File.basename(file_name)}#{lno}"
       end
-
       parts.join(" ")
     end
 
@@ -589,12 +568,12 @@ module Vivarium
 
     def read_span_payload(payload)
       bytes = payload.to_s.b
-      return [0, -1, -1] if bytes.bytesize < 8
+      return [nil, nil, -1] if bytes.empty?
 
-      method_id = bytes[0, 8].unpack1("q<")
-      file_id = bytes.bytesize >= 16 ? bytes[8, 8].unpack1("q<") : -1
-      lineno = bytes.bytesize >= 24 ? bytes[16, 8].unpack1("q<") : -1
-      [method_id, file_id, lineno]
+      method_name = Vivarium.c_string(bytes[0, Vivarium::SPAN_METHOD_SIZE])
+      file_name   = Vivarium.c_string(bytes[Vivarium::SPAN_METHOD_SIZE, Vivarium::SPAN_FILE_SIZE])
+      lineno      = bytes.bytesize > Vivarium::SPAN_LINENO_OFFSET ? bytes[Vivarium::SPAN_LINENO_OFFSET, 8].unpack1("q<") : -1
+      [method_name, file_name, lineno]
     end
 
     def read_proc_fork_child_pid(payload)

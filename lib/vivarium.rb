@@ -33,6 +33,13 @@ module Vivarium
   EVENT_DROPPED_OFFSET = 288
   EVENTS_RINGBUF_PAGES = 256
 
+  SPAN_METHOD_SIZE     = 128
+  SPAN_FILE_SIZE       = 120
+  SPAN_LINENO_OFFSET   = SPAN_METHOD_SIZE + SPAN_FILE_SIZE  # 248
+
+  SPAN_RAISE_SLOT_SIZE     = 80
+  SPAN_RAISE_LINENO_OFFSET = SPAN_RAISE_SLOT_SIZE * 3        # 240
+
   SSL_WRITE_PAYLOAD_DATA_LEN_OFFSET = 0
   SSL_WRITE_PAYLOAD_CAP_LEN_OFFSET = 4
   SSL_WRITE_PAYLOAD_DATA_OFFSET = 8
@@ -1394,19 +1401,19 @@ module Vivarium
           return 0;
         }
 
-        u64 method_id = 0;
-        u64 file_id = 0;
-        u64 lineno = 0;
-        bpf_usdt_readarg(1, ctx, &method_id);
-        bpf_usdt_readarg(2, ctx, &file_id);
+        u64 method_str_ptr = 0;
+        u64 file_str_ptr = 0;
+        s64 lineno = 0;
+        bpf_usdt_readarg(1, ctx, &method_str_ptr);
+        bpf_usdt_readarg(2, ctx, &file_str_ptr);
         bpf_usdt_readarg(3, ctx, &lineno);
 
         struct event_t ev = {};
         ev.pid = pid;
         __builtin_memcpy(ev.event_name, "span_start", 11);
-        __builtin_memcpy(&ev.payload[0], &method_id, sizeof(method_id));
-        __builtin_memcpy(&ev.payload[8], &file_id, sizeof(file_id));
-        __builtin_memcpy(&ev.payload[16], &lineno, sizeof(lineno));
+        bpf_probe_read_user_str(&ev.payload[0], #{SPAN_METHOD_SIZE}, (void*)method_str_ptr);
+        bpf_probe_read_user_str(&ev.payload[#{SPAN_METHOD_SIZE}], #{SPAN_FILE_SIZE}, (void*)file_str_ptr);
+        __builtin_memcpy(&ev.payload[#{SPAN_LINENO_OFFSET}], &lineno, sizeof(lineno));
         submit_event(&ev);
         return 0;
       }
@@ -1421,19 +1428,19 @@ module Vivarium
           return 0;
         }
 
-        u64 method_id = 0;
-        u64 file_id = 0;
-        u64 lineno = 0;
-        bpf_usdt_readarg(1, ctx, &method_id);
-        bpf_usdt_readarg(2, ctx, &file_id);
+        u64 method_str_ptr = 0;
+        u64 file_str_ptr = 0;
+        s64 lineno = 0;
+        bpf_usdt_readarg(1, ctx, &method_str_ptr);
+        bpf_usdt_readarg(2, ctx, &file_str_ptr);
         bpf_usdt_readarg(3, ctx, &lineno);
 
         struct event_t ev = {};
         ev.pid = pid;
         __builtin_memcpy(ev.event_name, "span_stop", 10);
-        __builtin_memcpy(&ev.payload[0], &method_id, sizeof(method_id));
-        __builtin_memcpy(&ev.payload[8], &file_id, sizeof(file_id));
-        __builtin_memcpy(&ev.payload[16], &lineno, sizeof(lineno));
+        bpf_probe_read_user_str(&ev.payload[0], #{SPAN_METHOD_SIZE}, (void*)method_str_ptr);
+        bpf_probe_read_user_str(&ev.payload[#{SPAN_METHOD_SIZE}], #{SPAN_FILE_SIZE}, (void*)file_str_ptr);
+        __builtin_memcpy(&ev.payload[#{SPAN_LINENO_OFFSET}], &lineno, sizeof(lineno));
         submit_event(&ev);
         return 0;
       }
@@ -1510,22 +1517,22 @@ module Vivarium
           return 0;
         }
 
-        u64 error_id = 0;
-        u64 message_id = 0;
-        u64 file_id = 0;
-        u64 lineno = 0;
-        bpf_usdt_readarg(1, ctx, &error_id);
-        bpf_usdt_readarg(2, ctx, &message_id);
-        bpf_usdt_readarg(3, ctx, &file_id);
+        u64 error_str_ptr = 0;
+        u64 message_str_ptr = 0;
+        u64 file_str_ptr = 0;
+        s64 lineno = 0;
+        bpf_usdt_readarg(1, ctx, &error_str_ptr);
+        bpf_usdt_readarg(2, ctx, &message_str_ptr);
+        bpf_usdt_readarg(3, ctx, &file_str_ptr);
         bpf_usdt_readarg(4, ctx, &lineno);
 
         struct event_t ev = {};
         ev.pid = pid;
         __builtin_memcpy(ev.event_name, "span_raise", 11);
-        __builtin_memcpy(&ev.payload[0], &error_id, sizeof(error_id));
-        __builtin_memcpy(&ev.payload[8], &message_id, sizeof(message_id));
-        __builtin_memcpy(&ev.payload[16], &file_id, sizeof(file_id));
-        __builtin_memcpy(&ev.payload[24], &lineno, sizeof(lineno));
+        bpf_probe_read_user_str(&ev.payload[0], #{SPAN_RAISE_SLOT_SIZE}, (void*)error_str_ptr);
+        bpf_probe_read_user_str(&ev.payload[#{SPAN_RAISE_SLOT_SIZE}], #{SPAN_RAISE_SLOT_SIZE}, (void*)message_str_ptr);
+        bpf_probe_read_user_str(&ev.payload[#{SPAN_RAISE_SLOT_SIZE * 2}], #{SPAN_RAISE_SLOT_SIZE}, (void*)file_str_ptr);
+        __builtin_memcpy(&ev.payload[#{SPAN_RAISE_LINENO_OFFSET}], &lineno, sizeof(lineno));
         submit_event(&ev);
         return 0;
       }
@@ -1806,20 +1813,18 @@ module Vivarium
     pid = Process.pid
     store.register_pid(pid)
 
-    method_id_queue = Thread::Queue.new
     main_tid = gettid
 
     correlator = Correlator.new(
       pin_dir: pin_dir,
       observer_pid: pid,
       main_tid: main_tid,
-      method_id_queue: method_id_queue,
       filter: filter,
       dest: dest
     )
     correlator.start
 
-    tracer = build_observe_tracepoint(method_id_queue)
+    tracer = build_observe_tracepoint
     tracer.enable
 
     session = ObservationSession.new(
@@ -1836,20 +1841,18 @@ module Vivarium
     pid = Process.pid
     store.register_pid(pid)
 
-    method_id_queue = Thread::Queue.new
     main_tid = gettid
 
     correlator = Correlator.new(
       pin_dir: pin_dir,
       observer_pid: pid,
       main_tid: main_tid,
-      method_id_queue: method_id_queue,
       filter: filter,
       dest: dest
     )
     correlator.start
 
-    tracer = build_observe_tracepoint(method_id_queue)
+    tracer = build_observe_tracepoint
     tracer.enable
 
     yield
@@ -1859,15 +1862,13 @@ module Vivarium
     correlator&.stop
   end
 
-  def self.build_observe_tracepoint(method_id_queue)
+  def self.build_observe_tracepoint
     allow_classes = SPAN_ALLOWCLASSES
     allowlist = SPAN_ALLOWLIST
     TracePoint.new(:call, :c_call, :return, :c_return, :raise) do |tp|
       if tp.event == :raise
         # FIXME: handle threaded events in the future
-        if tp.raised_exception.kind_of?(ThreadError)
-          next
-        end
+        next if tp.raised_exception.kind_of?(ThreadError)
 
         Vivarium::Usdt.raise(
           tp.raised_exception.class.to_s,
@@ -1886,8 +1887,7 @@ module Vivarium
 
       case tp.event
       when :call, :c_call
-        method_id = Vivarium::Usdt.start(tp.defined_class.to_s, tp.method_id.to_s, file: tp.path, lineno: tp.lineno)
-        method_id_queue << [method_id, signature]
+        Vivarium::Usdt.start(tp.defined_class.to_s, tp.method_id.to_s, file: tp.path, lineno: tp.lineno)
       when :return, :c_return
         Vivarium::Usdt.stop(tp.defined_class.to_s, tp.method_id.to_s, file: tp.path, lineno: tp.lineno)
       end

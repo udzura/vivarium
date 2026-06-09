@@ -23,17 +23,15 @@ module Vivarium
 
     POLL_TIMEOUT_MS = 200
 
-    def initialize(pin_dir:, observer_pid:, main_tid:, method_id_queue:, filter: nil, dest: $stdout)
+    def initialize(pin_dir:, observer_pid:, main_tid:, filter: nil, dest: $stdout)
       @pin_dir = pin_dir
       @observer_pid = observer_pid
       @main_tid = main_tid
-      @method_id_queue = method_id_queue
       @filter = filter
       @dest = dest
 
       @events = []
       @events_mutex = Mutex.new
-      @method_table = {}
       @stop_flag = false
       @started = false
 
@@ -66,15 +64,12 @@ module Vivarium
       @session_stop_ktime = Vivarium.monotonic_ktime_ns
 
       3.times { safe_poll(50) }
-      drain_method_id_queue
 
       events_snapshot = @events_mutex.synchronize { @events.dup }
-      method_table_snapshot = @method_table.dup
       @stopped = true
 
       TreeRenderer.new(
         events: events_snapshot,
-        method_table: method_table_snapshot,
         observer_pid: @observer_pid,
         main_tid: @main_tid,
         session_start_iso: @session_start_iso,
@@ -91,7 +86,6 @@ module Vivarium
     def run
       until @stop_flag
         safe_poll(POLL_TIMEOUT_MS)
-        drain_method_id_queue
       end
     end
 
@@ -126,17 +120,5 @@ module Vivarium
       warn "[vivarium correlator] capture error: #{e.class}: #{e.message}"
     end
 
-    def drain_method_id_queue
-      loop do
-        msg = begin
-          @method_id_queue.pop(true)
-        rescue ThreadError
-          return
-        end
-
-        method_id, signature = msg
-        @method_table[method_id] = signature
-      end
-    end
   end
 end
