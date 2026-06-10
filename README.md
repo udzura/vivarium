@@ -139,6 +139,22 @@ bundle exec ruby examples/privilege_event_demo.rb
 
 This demo attempts setuid/setgid changes, sensitive file access, and `sudo` exec to trigger privilege-related events such as `setid_change`, `capable_check`, and `bprm_creds`.
 
+8) Ruby internal ENV access demo client:
+
+```bash
+bundle exec ruby examples/env_access_ruby_demo.rb
+```
+
+This demo triggers Ruby-side ENV methods (`[]`, `fetch`, `key?`, `[]=`, `store`, `delete`, `clear`, `replace`) and is intended to produce SPAN events.
+
+9) External command ENV libc access demo client:
+
+```bash
+bundle exec ruby examples/env_access_external_demo.rb
+```
+
+This demo spawns an external process that directly calls libc `getenv`, `setenv`, `unsetenv`, `putenv`, and `clearenv`, intended to trigger `env_caccess` eBPF events.
+
 You can also start top-level observation without a block (it keeps observing until process exit):
 
 ```ruby

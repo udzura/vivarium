@@ -160,4 +160,20 @@ class VivariumDecodePayloadsTest < Test::Unit::TestCase
     assert_equal captured.bytesize, decoded[:cap_len]
     assert_equal captured, decoded[:data]
   end
+
+  test "decode ENV payload for getenv" do
+    payload = "getenv".ljust(Vivarium::ENV_PAYLOAD_OP_SIZE, "\x00") +
+              "HOME".ljust(Vivarium::ENV_PAYLOAD_KEY_SIZE, "\x00")
+    decoded = Vivarium.decode_env_payload(payload)
+
+    assert_equal "op=getenv key=\"HOME\"", decoded
+  end
+
+  test "decode ENV payload for putenv strips value" do
+    payload = "putenv".ljust(Vivarium::ENV_PAYLOAD_OP_SIZE, "\x00") +
+              "PATH=/usr/bin".ljust(Vivarium::ENV_PAYLOAD_KEY_SIZE, "\x00")
+    decoded = Vivarium.decode_env_payload(payload)
+
+    assert_equal "op=putenv key=\"PATH\"", decoded
+  end
 end
