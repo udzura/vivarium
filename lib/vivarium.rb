@@ -2053,11 +2053,12 @@ module Vivarium
       next unless is_target
 
       file_arg = tail_fit_string(tp.path, SPAN_FILE_ARG_MAX)
+      span_class_name = tp.self.equal?(ENV) ? "ENV" : tp.defined_class.to_s
       case tp.event
       when :call, :c_call
-        Vivarium::Usdt.start(tp.defined_class.to_s, tp.method_id.to_s, file: file_arg, lineno: tp.lineno)
+        Vivarium::Usdt.start(span_class_name, tp.method_id.to_s, file: file_arg, lineno: tp.lineno)
       when :return, :c_return
-        Vivarium::Usdt.stop(tp.defined_class.to_s, tp.method_id.to_s, file: file_arg, lineno: tp.lineno)
+        Vivarium::Usdt.stop(span_class_name, tp.method_id.to_s, file: file_arg, lineno: tp.lineno)
       end
     end
   end
