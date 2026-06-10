@@ -729,26 +729,6 @@ module Vivarium
         }
       }
 
-      static __always_inline void submit_env_event(u32 pid, const char *op, u32 op_len, const char *name_ptr)
-      {
-        struct event_t ev = {};
-        ev.pid = pid;
-        __builtin_memcpy(ev.event_name, "env_caccess", 12);
-
-        if (op && op_len > 0) {
-          if (op_len > #{ENV_PAYLOAD_OP_SIZE} - 1) {
-            op_len = #{ENV_PAYLOAD_OP_SIZE} - 1;
-          }
-          __builtin_memcpy(&ev.payload[0], op, op_len);
-        }
-
-        if (name_ptr) {
-          bpf_probe_read_user_str(&ev.payload[#{ENV_PAYLOAD_KEY_OFFSET}], #{ENV_PAYLOAD_KEY_SIZE}, name_ptr);
-        }
-
-        submit_event(&ev);
-      }
-
       static __always_inline void submit_event(struct event_t *src)
       {
         u32 key = 0;
@@ -774,6 +754,26 @@ module Vivarium
         }
 
         events.ringbuf_submit(ev, 0);
+      }
+
+      static __always_inline void submit_env_event(u32 pid, const char *op, u32 op_len, const char *name_ptr)
+      {
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "env_caccess", 12);
+
+        if (op && op_len > 0) {
+          if (op_len > #{ENV_PAYLOAD_OP_SIZE} - 1) {
+            op_len = #{ENV_PAYLOAD_OP_SIZE} - 1;
+          }
+          __builtin_memcpy(&ev.payload[0], op, op_len);
+        }
+
+        if (name_ptr) {
+          bpf_probe_read_user_str(&ev.payload[#{ENV_PAYLOAD_KEY_OFFSET}], #{ENV_PAYLOAD_KEY_SIZE}, name_ptr);
+        }
+
+        submit_event(&ev);
       }
 
       static __always_inline int is_dns_destination(void *addr)
