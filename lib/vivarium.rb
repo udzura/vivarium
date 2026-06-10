@@ -95,7 +95,20 @@ module Vivarium
     "Kernel#eval",
     "Object#instance_eval",
     "Object#instance_exec",
+    "ENV#[]",
+    "ENV#fetch",
+    "ENV#key?",
+    "ENV#[]=",
+    "ENV#store",
+    "ENV#delete",
+    "ENV#clear",
+    "ENV#replace",
   ].freeze
+
+  ENV_PAYLOAD_OP_SIZE = 16
+  ENV_PAYLOAD_KEY_OFFSET = ENV_PAYLOAD_OP_SIZE
+  ENV_PAYLOAD_KEY_SIZE = EVENT_PAYLOAD_SIZE - ENV_PAYLOAD_KEY_OFFSET
+
   EVENT_SEVERITY_HIGH = %w[
     capable_check bprm_creds setid_change task_kill
     ptrace_check sb_mount kernel_read_file
@@ -407,6 +420,20 @@ module Vivarium
     { data_len: data_len, cap_len: cap_len, data: data }
   end
 
+  def self.decode_env_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+    return "" if bytes.bytesize < ENV_PAYLOAD_OP_SIZE
+
+    op = c_string(bytes[0, ENV_PAYLOAD_OP_SIZE])
+    key = c_string(bytes[ENV_PAYLOAD_KEY_OFFSET, ENV_PAYLOAD_KEY_SIZE])
+
+    return "" if op.empty?
+    return "op=#{op}" if key.empty?
+
+    key = key.split("=", 2).first if op == "putenv"
+    "op=#{op} key=#{key.inspect}"
+  end
+
   def self.decode_span_raise_payload(raw_payload)
     bytes = raw_payload.to_s.b
     return "" if bytes.bytesize < 8
@@ -494,6 +521,9 @@ module Vivarium
     when "ssl_write"
       decoded = decode_ssl_write_payload(event.payload)
       "data_len=#{decoded[:data_len]} cap_len=#{decoded[:cap_len]}"
+    when "env_caccess"
+      decoded = decode_env_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
     when "dlopen", "mmap_exec"
       strip_to_first_null(event.payload).inspect
     else
@@ -697,6 +727,26 @@ module Vivarium
           default:
             return 0;
         }
+      }
+
+      static __always_inline void submit_env_event(u32 pid, const char *op, u32 op_len, const char *name_ptr)
+      {
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "env_caccess", 12);
+
+        if (op && op_len > 0) {
+          if (op_len > #{ENV_PAYLOAD_OP_SIZE} - 1) {
+            op_len = #{ENV_PAYLOAD_OP_SIZE} - 1;
+          }
+          __builtin_memcpy(&ev.payload[0], op, op_len);
+        }
+
+        if (name_ptr) {
+          bpf_probe_read_user_str(&ev.payload[#{ENV_PAYLOAD_KEY_OFFSET}], #{ENV_PAYLOAD_KEY_SIZE}, name_ptr);
+        }
+
+        submit_event(&ev);
       }
 
       static __always_inline void submit_event(struct event_t *src)
@@ -1519,6 +1569,80 @@ module Vivarium
         return 0;
       }
 
+      int on_getenv(struct pt_regs *ctx)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+        const char *name = (const char *)PT_REGS_PARM1(ctx);
+
+        if (!target_enabled(pid, tid) || !name) {
+          return 0;
+        }
+
+        submit_env_event(pid, "getenv", 6, name);
+        return 0;
+      }
+
+      int on_setenv(struct pt_regs *ctx)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+        const char *name = (const char *)PT_REGS_PARM1(ctx);
+
+        if (!target_enabled(pid, tid) || !name) {
+          return 0;
+        }
+
+        submit_env_event(pid, "setenv", 6, name);
+        return 0;
+      }
+
+      int on_unsetenv(struct pt_regs *ctx)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+        const char *name = (const char *)PT_REGS_PARM1(ctx);
+
+        if (!target_enabled(pid, tid) || !name) {
+          return 0;
+        }
+
+        submit_env_event(pid, "unsetenv", 8, name);
+        return 0;
+      }
+
+      int on_putenv(struct pt_regs *ctx)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+        const char *string = (const char *)PT_REGS_PARM1(ctx);
+
+        if (!target_enabled(pid, tid) || !string) {
+          return 0;
+        }
+
+        submit_env_event(pid, "putenv", 6, string);
+        return 0;
+      }
+
+      int on_clearenv(struct pt_regs *ctx)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        submit_env_event(pid, "clearenv", 8, 0);
+        return 0;
+      }
+
       int on_span_raise(struct pt_regs *ctx)
       {
         u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -1551,11 +1675,12 @@ module Vivarium
     CLANG
 
     def initialize(pin_dir: Vivarium.bpf_pin_dir, ssl_trace: true, libssl_path: nil,
-                   dlopen_trace: true, libc_path: nil)
+                   dlopen_trace: true, env_trace: true, libc_path: nil)
       @pin_dir      = pin_dir
       @ssl_trace    = ssl_trace
       @libssl_path  = libssl_path
       @dlopen_trace = dlopen_trace
+      @env_trace    = env_trace
       @libc_path    = libc_path
     end
 
@@ -1580,6 +1705,7 @@ module Vivarium
 
       attach_ssl_write_uprobe(bpf) if @ssl_trace
       attach_dlopen_uprobe(bpf) if @dlopen_trace
+      attach_env_uprobes(bpf) if @env_trace
 
       config_root_targets = bpf["config_root_targets"]
       config_spawned_targets = bpf["config_spawned_targets"]
@@ -1650,6 +1776,30 @@ module Vivarium
       puts "[vivariumd] dlopen uprobe attached via #{path}"
     rescue StandardError => e
       warn "[vivariumd] dlopen uprobe attach failed: #{e.class}: #{e.message}"
+    end
+
+    def attach_env_uprobes(bpf)
+      path = resolve_libc_path
+      unless path
+        warn "[vivariumd] libc not found; ENV uprobes disabled " \
+             "(set --libc PATH or VIVARIUM_LIBC_PATH to override)"
+        return
+      end
+
+      {
+        "getenv" => "on_getenv",
+        "setenv" => "on_setenv",
+        "unsetenv" => "on_unsetenv",
+        "putenv" => "on_putenv",
+        "clearenv" => "on_clearenv"
+      }.each do |sym, fn_name|
+        begin
+          bpf.attach_uprobe(name: path, sym: sym, fn_name: fn_name)
+          puts "[vivariumd] #{sym} uprobe attached via #{path}"
+        rescue StandardError => e
+          warn "[vivariumd] #{sym} uprobe attach failed: #{e.class}: #{e.message}"
+        end
+      end
     end
 
     def resolve_libc_path
@@ -1892,7 +2042,11 @@ module Vivarium
         next
       end
 
-      signature = "#{tp.defined_class}##{tp.method_id}"
+      signature = if tp.self.equal?(ENV)
+        "ENV##{tp.method_id}"
+      else
+        "#{tp.defined_class}##{tp.method_id}"
+      end
       is_target = allowlist.include?(signature) || \
         allow_classes.any? { |klass| tp.defined_class == klass } || \
         allow_classes.any? { |klass| tp.defined_class == klass.singleton_class }
@@ -1935,10 +2089,11 @@ module Vivarium
 
   def self.run_daemon!(argv = ARGV)
     options = { pin_dir: bpf_pin_dir, ssl_trace: true, libssl_path: nil,
+                env_trace: true,
                 dlopen_trace: true, libc_path: nil }
     OptionParser.new do |opts|
       opts.banner = "Usage: vivariumd [--pin-dir PATH] [--no-ssl-trace] [--libssl PATH] " \
-                    "[--no-dlopen-trace] [--libc PATH]"
+                    "[--no-dlopen-trace] [--no-env-trace] [--libc PATH]"
       opts.on("--pin-dir PATH", "Pinned map directory") { |v| options[:pin_dir] = v }
       opts.on("--[no-]ssl-trace", "Attach OpenSSL SSL_write uprobe (default: enabled)") do |v|
         options[:ssl_trace] = v
@@ -1948,6 +2103,9 @@ module Vivarium
       end
       opts.on("--[no-]dlopen-trace", "Attach libc dlopen uprobe (default: enabled)") do |v|
         options[:dlopen_trace] = v
+      end
+      opts.on("--[no-]env-trace", "Attach libc getenv/setenv uprobes (default: enabled)") do |v|
+        options[:env_trace] = v
       end
       opts.on("--libc PATH", "Path to libc.so for dlopen uprobe") do |v|
         options[:libc_path] = v
@@ -1959,6 +2117,7 @@ module Vivarium
       ssl_trace: options[:ssl_trace],
       libssl_path: options[:libssl_path],
       dlopen_trace: options[:dlopen_trace],
+      env_trace: options[:env_trace],
       libc_path: options[:libc_path]
     ).run
   end
