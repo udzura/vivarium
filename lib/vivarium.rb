@@ -2127,3 +2127,4 @@ end
 require_relative "vivarium/correlator"
 require_relative "vivarium/display_filter"
 require_relative "vivarium/tree_renderer"
+require_relative "vivarium/box"
