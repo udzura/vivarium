@@ -155,6 +155,14 @@ bundle exec ruby examples/env_access_external_demo.rb
 
 This demo spawns an external process that directly calls libc `getenv`, `setenv`, `unsetenv`, `putenv`, and `clearenv`, intended to trigger `env_caccess` eBPF events.
 
+10) Box context demo:
+
+```bash
+bundle exec ruby examples/box_demo.rb
+```
+
+This demo shows how to use `Vivarium::Box` to isolate Ruby code evaluation and trace method calls within that isolated context.
+
 You can also start top-level observation without a block (it keeps observing until process exit):
 
 ```ruby
