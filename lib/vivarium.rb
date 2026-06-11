@@ -7,6 +7,12 @@ require "optparse"
 require "pathname"
 require "rbbcc"
 require "socket"
+if Ruby::Box.enabled?
+  Ruby::Box.root.require "vivarium_usdt"
+else
+  require "vivarium_usdt"
+end
+
 require_relative "vivarium/version"
 require_relative "vivarium/cli"
 
@@ -1694,7 +1700,6 @@ module Vivarium
         .gsub("__VIVARIUM_F_PATH_OFFSET__", f_path_offset.to_s)
         .gsub("__VIVARIUM_DENTRY_D_NAME_OFFSET__", d_name_offset.to_s)
 
-      require "vivarium_usdt"
       usdt_so_path = ENV.fetch("VIVARIUM_USDT_SO_PATH") { Vivarium.locate_vivarium_usdt_so }
       usdt = RbBCC::USDT.new(path: usdt_so_path)
       usdt.enable_probe(probe: "start_probe", fn_name: "on_span_start")
@@ -1969,8 +1974,6 @@ module Vivarium
   end
 
   def self.top_observe(pin_dir: bpf_pin_dir, dest: $stdout, filter: nil)
-    require "vivarium_usdt"
-
     store = MapStore.new(pin_dir: pin_dir)
     pid = Process.pid
     store.register_pid(pid)
@@ -1997,8 +2000,6 @@ module Vivarium
   end
 
   def self.scoped_observe(pin_dir:, dest:, filter: nil)
-    require "vivarium_usdt"
-
     store = MapStore.new(pin_dir: pin_dir)
     pid = Process.pid
     store.register_pid(pid)
@@ -2079,7 +2080,6 @@ module Vivarium
   end
 
   def self.locate_vivarium_usdt_so
-    require "vivarium_usdt/vivarium_usdt"
     so = $LOADED_FEATURES.find { |p| p =~ %r{vivarium_usdt/vivarium_usdt\.(so|bundle|dylib)\z} }
     raise Error, "vivarium_usdt native extension not found in $LOADED_FEATURES" unless so
 
