@@ -7,7 +7,7 @@ require "optparse"
 require "pathname"
 require "rbbcc"
 require "socket"
-if Ruby::Box.enabled?
+if defined?(Ruby) && defined?(Ruby::Box) && Ruby::Box.enabled?
   Ruby::Box.root.require "vivarium_usdt"
 else
   require "vivarium_usdt"
@@ -2127,4 +2127,6 @@ end
 require_relative "vivarium/correlator"
 require_relative "vivarium/display_filter"
 require_relative "vivarium/tree_renderer"
-require_relative "vivarium/box"
+if defined?(Ruby) && defined?(Ruby::Box) && Ruby::Box.enabled?
+  require_relative "vivarium/box"
+end
