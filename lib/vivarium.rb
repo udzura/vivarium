@@ -25,6 +25,8 @@ module Vivarium
   CONFIG_TARGETS_PIN = CONFIG_ROOT_TARGETS_PIN
   EVENTS_PIN = File.join(PIN_DIR, "events")
 
+  SOCKET_PATH = ENV.fetch("VIVARIUM_SOCKET_PATH", "/run/vivarium/vivariumd.sock")
+
   EVENT_NAME_SIZE = 16
   EVENT_PAYLOAD_SIZE = 256
   EVENT_TS_SIZE = 8
@@ -160,12 +162,17 @@ module Vivarium
   }.freeze
 
   @bpf_pin_dir = PIN_DIR
+  @socket_path = SOCKET_PATH
 
   class << self
-    attr_writer :bpf_pin_dir
+    attr_writer :bpf_pin_dir, :socket_path
 
     def bpf_pin_dir
       @bpf_pin_dir || PIN_DIR
+    end
+
+    def socket_path
+      @socket_path || SOCKET_PATH
     end
   end
 
@@ -542,39 +549,6 @@ module Vivarium
     return bytes if nul.nil?
 
     bytes[0, nul]
-  end
-
-  class MapStore
-    def initialize(pin_dir: Vivarium.bpf_pin_dir)
-      @pin_dir = pin_dir
-      @config_root_targets = RbBCC::HashTable.from_pin(
-        File.join(@pin_dir, "config_root_targets"),
-        "unsigned int",
-        "unsigned char",
-        keysize: 4,
-        leafsize: 1
-      )
-      @config_spawned_targets = RbBCC::HashTable.from_pin(
-        File.join(@pin_dir, "config_spawned_targets"),
-        "unsigned int",
-        "unsigned char",
-        keysize: 4,
-        leafsize: 1
-      )
-    rescue StandardError => e
-      raise Error, "failed to open pinned maps under #{@pin_dir}: #{e.class}: #{e.message}"
-    end
-
-    def register_pid(pid)
-      @config_root_targets[pid] = 1
-    end
-
-    def unregister_pid(pid)
-      @config_root_targets.delete(pid)
-      @config_spawned_targets.clear
-    rescue KeyError
-      nil
-    end
   end
 
   class Daemon
@@ -1680,9 +1654,11 @@ module Vivarium
       }
     CLANG
 
-    def initialize(pin_dir: Vivarium.bpf_pin_dir, ssl_trace: true, libssl_path: nil,
+    def initialize(pin_dir: Vivarium.bpf_pin_dir, socket_path: Vivarium.socket_path,
+                   ssl_trace: true, libssl_path: nil,
                    dlopen_trace: true, env_trace: true, libc_path: nil)
       @pin_dir      = pin_dir
+      @socket_path  = socket_path
       @ssl_trace    = ssl_trace
       @libssl_path  = libssl_path
       @dlopen_trace = dlopen_trace
@@ -1722,19 +1698,51 @@ module Vivarium
       pin_map(config_spawned_targets, File.join(@pin_dir, "config_spawned_targets"))
       pin_map(events_ringbuf, File.join(@pin_dir, "events"))
 
+      event_log = EventLog.new
+      registry = Registry.new(config_root_targets, config_spawned_targets)
+      start_ringbuf_poller(bpf, events_ringbuf, event_log)
+
+      @api_server = ApiServer.new(
+        socket_path: @socket_path,
+        event_log: event_log,
+        registry: registry,
+        daemon_pid: Process.pid
+      )
+      @api_server.start
+
       puts "[vivariumd] started"
       puts "[vivariumd] pinned maps in #{@pin_dir}"
       puts "[vivariumd] watching LSM file_open (f_path offset=#{f_path_offset})"
       puts "[vivariumd] USDT attached via #{usdt_so_path}"
+      puts "[vivariumd] API listening on unix:#{@socket_path}"
 
       loop do
         sleep 1
       end
     rescue Interrupt
       puts "\n[vivariumd] stopping"
+    ensure
+      @api_server&.stop
     end
 
     private
+
+    def start_ringbuf_poller(bpf, events_ringbuf, event_log)
+      events_ringbuf.open_ring_buffer do |_ctx, data, size|
+        bytes = data[0, size].to_s.b
+        bytes = bytes.ljust(EVENT_STRUCT_SIZE, "\x00") if bytes.bytesize < EVENT_STRUCT_SIZE
+        event_log.append(bytes)
+        0
+      end
+
+      @ringbuf_thread = Thread.new do
+        loop do
+          bpf.ring_buffer_poll(50)
+        rescue StandardError => e
+          warn "[vivariumd] ringbuf poll error: #{e.class}: #{e.message}"
+        end
+      end
+    end
 
     def attach_ssl_write_uprobe(bpf)
       path = resolve_libssl_path
@@ -1949,8 +1957,8 @@ module Vivarium
   end
 
   class ObservationSession
-    def initialize(store:, pid:, tracer:, correlator:)
-      @store = store
+    def initialize(client:, pid:, tracer:, correlator:)
+      @client = client
       @pid = pid
       @tracer = tracer
       @correlator = correlator
@@ -1962,58 +1970,58 @@ module Vivarium
 
       @stopped = true
       @tracer.disable
-      @store.unregister_pid(@pid)
+      @client.unregister(@pid)
       @correlator.stop
     end
   end
 
-  def self.observe(pin_dir: bpf_pin_dir, dest: $stdout, filter: nil, &block)
-    return scoped_observe(pin_dir: pin_dir, dest: dest, filter: filter, &block) if block_given?
+  def self.observe(socket_path: self.socket_path, dest: $stdout, filter: nil, &block)
+    if block_given?
+      return scoped_observe(socket_path: socket_path, dest: dest, filter: filter, &block)
+    end
 
-    top_observe(pin_dir: pin_dir, dest: dest, filter: filter)
+    top_observe(socket_path: socket_path, dest: dest, filter: filter)
   end
 
-  def self.top_observe(pin_dir: bpf_pin_dir, dest: $stdout, filter: nil)
-    store = MapStore.new(pin_dir: pin_dir)
+  def self.top_observe(socket_path: self.socket_path, dest: $stdout, filter: nil)
+    client = DaemonClient.new(socket_path: socket_path)
     pid = Process.pid
-    store.register_pid(pid)
-
     main_tid = gettid
 
     correlator = Correlator.new(
-      pin_dir: pin_dir,
+      socket_path: socket_path,
       observer_pid: pid,
       main_tid: main_tid,
       filter: filter,
       dest: dest
     )
     correlator.start
+    client.register(pid)
 
     tracer = build_observe_tracepoint
     tracer.enable
 
     session = ObservationSession.new(
-      store: store, pid: pid, tracer: tracer, correlator: correlator
+      client: client, pid: pid, tracer: tracer, correlator: correlator
     )
     at_exit { session.stop }
     session
   end
 
-  def self.scoped_observe(pin_dir:, dest:, filter: nil)
-    store = MapStore.new(pin_dir: pin_dir)
+  def self.scoped_observe(socket_path: self.socket_path, dest:, filter: nil)
+    client = DaemonClient.new(socket_path: socket_path)
     pid = Process.pid
-    store.register_pid(pid)
-
     main_tid = gettid
 
     correlator = Correlator.new(
-      pin_dir: pin_dir,
+      socket_path: socket_path,
       observer_pid: pid,
       main_tid: main_tid,
       filter: filter,
       dest: dest
     )
     correlator.start
+    client.register(pid)
 
     tracer = build_observe_tracepoint
     tracer.enable
@@ -2021,7 +2029,7 @@ module Vivarium
     yield
   ensure
     tracer&.disable
-    store&.unregister_pid(pid)
+    client&.unregister(pid)
     correlator&.stop
   end
 
@@ -2089,13 +2097,14 @@ module Vivarium
   end
 
   def self.run_daemon!(argv = ARGV)
-    options = { pin_dir: bpf_pin_dir, ssl_trace: true, libssl_path: nil,
+    options = { pin_dir: bpf_pin_dir, socket_path: socket_path, ssl_trace: true, libssl_path: nil,
                 env_trace: true,
                 dlopen_trace: true, libc_path: nil }
     OptionParser.new do |opts|
-      opts.banner = "Usage: vivariumd [--pin-dir PATH] [--no-ssl-trace] [--libssl PATH] " \
+      opts.banner = "Usage: vivariumd [--pin-dir PATH] [--socket PATH] [--no-ssl-trace] [--libssl PATH] " \
                     "[--no-dlopen-trace] [--no-env-trace] [--libc PATH]"
       opts.on("--pin-dir PATH", "Pinned map directory") { |v| options[:pin_dir] = v }
+      opts.on("--socket PATH", "Unix domain socket path for the HTTP API") { |v| options[:socket_path] = v }
       opts.on("--[no-]ssl-trace", "Attach OpenSSL SSL_write uprobe (default: enabled)") do |v|
         options[:ssl_trace] = v
       end
@@ -2115,6 +2124,7 @@ module Vivarium
 
     Daemon.new(
       pin_dir: options[:pin_dir],
+      socket_path: options[:socket_path],
       ssl_trace: options[:ssl_trace],
       libssl_path: options[:libssl_path],
       dlopen_trace: options[:dlopen_trace],
@@ -2124,6 +2134,8 @@ module Vivarium
   end
 end
 
+require_relative "vivarium/daemon_client"
+require_relative "vivarium/api_server"
 require_relative "vivarium/correlator"
 require_relative "vivarium/display_filter"
 require_relative "vivarium/tree_renderer"

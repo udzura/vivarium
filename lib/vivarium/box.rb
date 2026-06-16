@@ -23,10 +23,10 @@ module Vivarium
       ]
     }
 
-    def initialize(pin_dir: Vivarium.bpf_pin_dir, dest: $stdout, filter: DEFAULT_FILTER)
+    def initialize(socket_path: Vivarium.socket_path, dest: $stdout, filter: DEFAULT_FILTER)
       super()
       @inner_box = Ruby::Box.new
-      @pin_dir = pin_dir
+      @socket_path = socket_path
       @dest = dest
       @filter = filter
       @session = nil
@@ -124,7 +124,7 @@ module Vivarium
 
     def start_vivarium_observation
       puts "[debug] Starting Vivarium observation for Box method calls"
-      @session = Vivarium.top_observe(pin_dir: @pin_dir, dest: @dest, filter: @filter)
+      @session = Vivarium.top_observe(socket_path: @socket_path, dest: @dest, filter: @filter)
     end
 
     def stop_vivarium_observation

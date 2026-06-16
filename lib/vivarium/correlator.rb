@@ -1,48 +1,34 @@
 # frozen_string_literal: true
 
-require "rbbcc"
 require "time"
 
 module Vivarium
+  # Client-side consumer of the vivariumd event stream. Connects to the daemon's
+  # Unix domain socket, reads chunked raw event_t records, accumulates them, and
+  # renders a tree on stop. It never touches BPF maps or the ring buffer directly.
   class Correlator
     RawEvent = Struct.new(
       :ktime_ns, :pid, :tid, :event_name, :payload, :dropped_since_last,
       keyword_init: true
     )
 
-    EVENT_C_TYPE = <<~C
-      struct event_t {
-        u64 ktime_ns;
-        u32 pid;
-        u32 tid;
-        char event_name[16];
-        char payload[256];
-        u64 dropped_since_last;
-      };
-    C
+    # Grace period after stop to let trailing events drain through the stream.
+    DRAIN_SLEEP = 0.3
 
-    POLL_TIMEOUT_MS = 200
-
-    def initialize(pin_dir:, observer_pid:, main_tid:, filter: nil, dest: $stdout)
-      @pin_dir = pin_dir
+    def initialize(socket_path: Vivarium.socket_path, observer_pid:, main_tid:,
+                   filter: nil, dest: $stdout)
+      @socket_path = socket_path
       @observer_pid = observer_pid
       @main_tid = main_tid
       @filter = filter
       @dest = dest
 
+      @client = DaemonClient.new(socket_path: socket_path)
       @events = []
       @events_mutex = Mutex.new
       @stop_flag = false
       @started = false
-
-      @ringbuf = RbBCC::RingBuf.from_pin(
-        File.join(@pin_dir, "events"),
-        EVENT_C_TYPE,
-        Vivarium::EVENTS_RINGBUF_PAGES
-      )
-      @ringbuf.open_ring_buffer do |_ctx, data, size|
-        capture_event(data, size)
-      end
+      @stopped = false
     end
 
     def start
@@ -50,6 +36,7 @@ module Vivarium
 
       @session_start_iso = Time.now.utc.iso8601(3)
       @session_start_ktime = Vivarium.monotonic_ktime_ns
+      @sock = @client.open_event_stream
       @thread = Thread.new { run }
       @started = true
     end
@@ -58,12 +45,12 @@ module Vivarium
       return unless @started
       return if @stopped
 
+      sleep DRAIN_SLEEP
       @stop_flag = true
-      @thread&.join(POLL_TIMEOUT_MS * 4 / 1000.0 + 1)
+      @sock&.close
+      @thread&.join(2)
       @session_stop_iso = Time.now.utc.iso8601(3)
       @session_stop_ktime = Vivarium.monotonic_ktime_ns
-
-      3.times { safe_poll(50) }
 
       events_snapshot = @events_mutex.synchronize { @events.dup }
       @stopped = true
@@ -85,18 +72,43 @@ module Vivarium
 
     def run
       until @stop_flag
-        safe_poll(POLL_TIMEOUT_MS)
+        size = read_chunk_size(@sock)
+        break if size.nil? || size.zero?
+
+        bytes = read_exactly(@sock, size)
+        break if bytes.nil?
+
+        @sock.read(2) # trailing CRLF after chunk data
+        capture_event(bytes)
       end
-    end
-
-    def safe_poll(timeout_ms)
-      @ringbuf.ring_buffer_poll(timeout_ms)
+    rescue IOError, Errno::EBADF, Errno::ECONNRESET
+      # socket closed on stop
     rescue StandardError => e
-      warn "[vivarium correlator] poll error: #{e.class}: #{e.message}"
+      warn "[vivarium correlator] stream error: #{e.class}: #{e.message}"
     end
 
-    def capture_event(data, size)
-      bytes = data[0, size].to_s.b
+    def read_chunk_size(sock)
+      line = sock.gets
+      return nil if line.nil?
+
+      Integer(line.strip, 16)
+    rescue ArgumentError
+      nil
+    end
+
+    def read_exactly(sock, size)
+      buffer = +""
+      while buffer.bytesize < size
+        chunk = sock.read(size - buffer.bytesize)
+        return nil if chunk.nil?
+
+        buffer << chunk
+      end
+      buffer
+    end
+
+    def capture_event(bytes)
+      bytes = bytes.to_s.b
       bytes = bytes.ljust(Vivarium::EVENT_STRUCT_SIZE, "\x00") if bytes.bytesize < Vivarium::EVENT_STRUCT_SIZE
 
       ktime_ns           = bytes[Vivarium::EVENT_TS_OFFSET,      Vivarium::EVENT_TS_SIZE].unpack1("Q<")
@@ -119,6 +131,5 @@ module Vivarium
     rescue StandardError => e
       warn "[vivarium correlator] capture error: #{e.class}: #{e.message}"
     end
-
   end
 end
