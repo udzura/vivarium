@@ -1433,60 +1433,6 @@ module Vivarium
         return 0;
       }
 
-      int on_span_start(struct pt_regs *ctx)
-      {
-        u64 pid_tgid = bpf_get_current_pid_tgid();
-        u32 pid = pid_tgid >> 32;
-        u32 tid = (u32)pid_tgid;
-
-        if (!target_enabled(pid, tid)) {
-          return 0;
-        }
-
-        u64 method_str_ptr = 0;
-        u64 file_str_ptr = 0;
-        s64 lineno = 0;
-        bpf_usdt_readarg(1, ctx, &method_str_ptr);
-        bpf_usdt_readarg(2, ctx, &file_str_ptr);
-        bpf_usdt_readarg(3, ctx, &lineno);
-
-        struct event_t ev = {};
-        ev.pid = pid;
-        __builtin_memcpy(ev.event_name, "span_start", 11);
-        bpf_probe_read_user_str(&ev.payload[0], #{SPAN_METHOD_SIZE}, (void*)method_str_ptr);
-        bpf_probe_read_user_str(&ev.payload[#{SPAN_METHOD_SIZE}], #{SPAN_FILE_SIZE}, (void*)file_str_ptr);
-        __builtin_memcpy(&ev.payload[#{SPAN_LINENO_OFFSET}], &lineno, sizeof(lineno));
-        submit_event(&ev);
-        return 0;
-      }
-
-      int on_span_stop(struct pt_regs *ctx)
-      {
-        u64 pid_tgid = bpf_get_current_pid_tgid();
-        u32 pid = pid_tgid >> 32;
-        u32 tid = (u32)pid_tgid;
-
-        if (!target_enabled(pid, tid)) {
-          return 0;
-        }
-
-        u64 method_str_ptr = 0;
-        u64 file_str_ptr = 0;
-        s64 lineno = 0;
-        bpf_usdt_readarg(1, ctx, &method_str_ptr);
-        bpf_usdt_readarg(2, ctx, &file_str_ptr);
-        bpf_usdt_readarg(3, ctx, &lineno);
-
-        struct event_t ev = {};
-        ev.pid = pid;
-        __builtin_memcpy(ev.event_name, "span_stop", 10);
-        bpf_probe_read_user_str(&ev.payload[0], #{SPAN_METHOD_SIZE}, (void*)method_str_ptr);
-        bpf_probe_read_user_str(&ev.payload[#{SPAN_METHOD_SIZE}], #{SPAN_FILE_SIZE}, (void*)file_str_ptr);
-        __builtin_memcpy(&ev.payload[#{SPAN_LINENO_OFFSET}], &lineno, sizeof(lineno));
-        submit_event(&ev);
-        return 0;
-      }
-
       int on_ssl_write(struct pt_regs *ctx)
       {
         u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -1622,8 +1568,67 @@ module Vivarium
         submit_env_event(pid, "clearenv", 8, 0);
         return 0;
       }
+    CLANG
 
-      int on_span_raise(struct pt_regs *ctx)
+    # USDT span handlers are generated per attached .so so each gets a unique
+    # fn_name. BCC emits _bpf_readarg_<fn_name>_<n> per USDT context, so sharing
+    # one fn_name across contexts triggers a redefinition error.
+    SPAN_PROBE_TEMPLATE = <<~CLANG
+      int on_span_start__SUFFIX__(struct pt_regs *ctx)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        u64 method_str_ptr = 0;
+        u64 file_str_ptr = 0;
+        s64 lineno = 0;
+        bpf_usdt_readarg(1, ctx, &method_str_ptr);
+        bpf_usdt_readarg(2, ctx, &file_str_ptr);
+        bpf_usdt_readarg(3, ctx, &lineno);
+
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "span_start", 11);
+        bpf_probe_read_user_str(&ev.payload[0], #{SPAN_METHOD_SIZE}, (void*)method_str_ptr);
+        bpf_probe_read_user_str(&ev.payload[#{SPAN_METHOD_SIZE}], #{SPAN_FILE_SIZE}, (void*)file_str_ptr);
+        __builtin_memcpy(&ev.payload[#{SPAN_LINENO_OFFSET}], &lineno, sizeof(lineno));
+        submit_event(&ev);
+        return 0;
+      }
+
+      int on_span_stop__SUFFIX__(struct pt_regs *ctx)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        u64 method_str_ptr = 0;
+        u64 file_str_ptr = 0;
+        s64 lineno = 0;
+        bpf_usdt_readarg(1, ctx, &method_str_ptr);
+        bpf_usdt_readarg(2, ctx, &file_str_ptr);
+        bpf_usdt_readarg(3, ctx, &lineno);
+
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "span_stop", 10);
+        bpf_probe_read_user_str(&ev.payload[0], #{SPAN_METHOD_SIZE}, (void*)method_str_ptr);
+        bpf_probe_read_user_str(&ev.payload[#{SPAN_METHOD_SIZE}], #{SPAN_FILE_SIZE}, (void*)file_str_ptr);
+        __builtin_memcpy(&ev.payload[#{SPAN_LINENO_OFFSET}], &lineno, sizeof(lineno));
+        submit_event(&ev);
+        return 0;
+      }
+
+      int on_span_raise__SUFFIX__(struct pt_regs *ctx)
       {
         u64 pid_tgid = bpf_get_current_pid_tgid();
         u32 pid = pid_tgid >> 32;
@@ -1656,14 +1661,16 @@ module Vivarium
 
     def initialize(pin_dir: Vivarium.bpf_pin_dir, socket_path: Vivarium.socket_path,
                    ssl_trace: true, libssl_path: nil,
-                   dlopen_trace: true, env_trace: true, libc_path: nil)
-      @pin_dir      = pin_dir
-      @socket_path  = socket_path
-      @ssl_trace    = ssl_trace
-      @libssl_path  = libssl_path
-      @dlopen_trace = dlopen_trace
-      @env_trace    = env_trace
-      @libc_path    = libc_path
+                   dlopen_trace: true, env_trace: true, libc_path: nil,
+                   usdt_so_paths: nil)
+      @pin_dir        = pin_dir
+      @socket_path    = socket_path
+      @ssl_trace      = ssl_trace
+      @libssl_path    = libssl_path
+      @dlopen_trace   = dlopen_trace
+      @env_trace      = env_trace
+      @libc_path      = libc_path
+      @usdt_so_paths  = usdt_so_paths
     end
 
     def run
@@ -1676,13 +1683,11 @@ module Vivarium
         .gsub("__VIVARIUM_F_PATH_OFFSET__", f_path_offset.to_s)
         .gsub("__VIVARIUM_DENTRY_D_NAME_OFFSET__", d_name_offset.to_s)
 
-      usdt_so_path = ENV.fetch("VIVARIUM_USDT_SO_PATH") { Vivarium.locate_vivarium_usdt_so }
-      usdt = RbBCC::USDT.new(path: usdt_so_path)
-      usdt.enable_probe(probe: "start_probe", fn_name: "on_span_start")
-      usdt.enable_probe(probe: "stop_probe", fn_name: "on_span_stop")
-      usdt.enable_probe(probe: "raise_probe", fn_name: "on_span_raise")
+      usdt_so_paths = resolve_usdt_so_paths
+      usdt_contexts = build_usdt_contexts(usdt_so_paths)
+      program += build_span_probe_sources(usdt_contexts)
 
-      bpf = RbBCC::BCC.new(text: program, usdt_contexts: [usdt])
+      bpf = RbBCC::BCC.new(text: program, usdt_contexts: usdt_contexts.map(&:last))
 
       attach_ssl_write_uprobe(bpf) if @ssl_trace
       attach_dlopen_uprobe(bpf) if @dlopen_trace
@@ -1713,7 +1718,6 @@ module Vivarium
       puts "[vivariumd] started"
       puts "[vivariumd] pinned maps in #{@pin_dir}"
       puts "[vivariumd] watching LSM file_open (f_path offset=#{f_path_offset})"
-      puts "[vivariumd] USDT attached via #{usdt_so_path}"
       puts "[vivariumd] API listening on unix:#{@socket_path}"
 
       loop do
@@ -1726,6 +1730,72 @@ module Vivarium
     end
 
     private
+
+    USDT_PROBES = [
+      ["start_probe", "on_span_start"],
+      ["stop_probe", "on_span_stop"],
+      ["raise_probe", "on_span_raise"]
+    ].freeze
+
+    def resolve_usdt_so_paths
+      raw =
+        if @usdt_so_paths && !@usdt_so_paths.empty?
+          @usdt_so_paths
+        else
+          env = ENV["VIVARIUM_USDT_SO_PATH"]
+          if env && !env.empty?
+            env.split(File::PATH_SEPARATOR)
+          else
+            [Vivarium.locate_vivarium_usdt_so]
+          end
+        end
+
+      paths = raw.map(&:strip).reject(&:empty?).uniq
+      existing = paths.select do |p|
+        if File.exist?(p)
+          true
+        else
+          warn "[vivariumd] USDT .so not found, skipping: #{p}"
+          false
+        end
+      end
+
+      if existing.empty?
+        raise Error, "no USDT .so files to attach " \
+                     "(set --usdt-so PATH or VIVARIUM_USDT_SO_PATH)"
+      end
+
+      existing
+    end
+
+    # Returns an array of [suffix, usdt] pairs. Each context gets a unique suffix
+    # so its enabled probes map to distinct BPF fn_names, and build_span_probe_sources
+    # emits matching handler definitions for exactly these suffixes.
+    def build_usdt_contexts(paths)
+      contexts = paths.each_with_index.filter_map do |path, idx|
+        usdt = RbBCC::USDT.new(path: path)
+        USDT_PROBES.each do |probe, fn_name|
+          usdt.enable_probe(probe: probe, fn_name: "#{fn_name}_#{idx}")
+        end
+        puts "[vivariumd] USDT context attached via #{path}"
+        [idx, usdt]
+      rescue StandardError => e
+        warn "[vivariumd] USDT attach failed for #{path}: #{e.class}: #{e.message}"
+        nil
+      end
+
+      if contexts.empty?
+        raise Error, "failed to attach any USDT contexts"
+      end
+
+      contexts
+    end
+
+    def build_span_probe_sources(contexts)
+      contexts.map do |idx, _usdt|
+        SPAN_PROBE_TEMPLATE.gsub("__SUFFIX__", "_#{idx}")
+      end.join("\n")
+    end
 
     def start_ringbuf_poller(bpf, events_ringbuf, event_log)
       events_ringbuf.open_ring_buffer do |_ctx, data, size|
@@ -2099,10 +2169,14 @@ module Vivarium
   def self.run_daemon!(argv = ARGV)
     options = { pin_dir: bpf_pin_dir, socket_path: socket_path, ssl_trace: true, libssl_path: nil,
                 env_trace: true,
-                dlopen_trace: true, libc_path: nil }
+                dlopen_trace: true, libc_path: nil, usdt_so_paths: [] }
     OptionParser.new do |opts|
       opts.banner = "Usage: vivariumd [--pin-dir PATH] [--socket PATH] [--no-ssl-trace] [--libssl PATH] " \
-                    "[--no-dlopen-trace] [--no-env-trace] [--libc PATH]"
+                    "[--no-dlopen-trace] [--no-env-trace] [--libc PATH] [--usdt-so PATH ...]"
+      opts.on("--usdt-so PATH", "USDT .so to attach (repeatable; " \
+                                "overrides VIVARIUM_USDT_SO_PATH)") do |v|
+        options[:usdt_so_paths] << v
+      end
       opts.on("--pin-dir PATH", "Pinned map directory") { |v| options[:pin_dir] = v }
       opts.on("--socket PATH", "Unix domain socket path for the HTTP API") { |v| options[:socket_path] = v }
       opts.on("--[no-]ssl-trace", "Attach OpenSSL SSL_write uprobe (default: enabled)") do |v|
@@ -2129,7 +2203,8 @@ module Vivarium
       libssl_path: options[:libssl_path],
       dlopen_trace: options[:dlopen_trace],
       env_trace: options[:env_trace],
-      libc_path: options[:libc_path]
+      libc_path: options[:libc_path],
+      usdt_so_paths: options[:usdt_so_paths]
     ).run
   end
 end
