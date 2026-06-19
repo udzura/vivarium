@@ -6,6 +6,7 @@ require "net/http"
 require "optparse"
 require "pathname"
 require "rbbcc"
+require "set"
 require "socket"
 if defined?(Ruby) && defined?(Ruby::Box) && Ruby::Box.enabled?
   Ruby::Box.root.require "vivarium_usdt"
@@ -87,14 +88,31 @@ module Vivarium
     TCPSocket,
     UDPSocket,
     UNIXSocket,
-    File,
-    Dir,
     Signal,
     Process,
     Process::UID,
     Process::GID,
     Net::HTTP,
   ]
+
+  # File/Dir are deliberately NOT in SPAN_ALLOWCLASSES: tracing every method is
+  # far too noisy and read/query methods (exist?, basename, read, stat, ...) carry
+  # little security signal. Instead only the security-relevant methods below are
+  # turned into spans. Detection is done via tp.self (not tp.defined_class) so that
+  # e.g. File.open, whose method is owned by IO, is still matched. Kernel LSM events
+  # (path_open, file_chmod, file_rename, file_symlink, file_hardlink, file_getdents)
+  # already capture the underlying filesystem actions regardless of the Ruby method.
+  SPAN_FILE_METHODS = %i[
+    open new write binwrite
+    delete unlink rename truncate
+    chmod lchmod chown lchown
+    symlink link readlink
+    realpath realdirpath
+    mkfifo mknod utime
+  ].to_set.freeze
+  SPAN_DIR_METHODS = %i[
+    mkdir rmdir delete unlink chdir chroot glob
+  ].to_set.freeze
   SPAN_ALLOWLIST = [
     "Kernel#system",
     "Kernel#require",
@@ -122,6 +140,26 @@ module Vivarium
     ptrace_check sb_mount kernel_read_file
     dlopen
   ].freeze
+
+  # Default display filter applied by both `vivarium load` (CLI) and Vivarium::Box.
+  # path_open fires on every file open and is far too noisy to show in full, so it
+  # is restricted to opens under /etc and /proc (config/state that matters for
+  # security review). render_event_payload renders the path via String#inspect,
+  # so the matched target text looks like "/etc/passwd" (leading quote included).
+  DEFAULT_FILTER = {
+    include_events: %w[
+      proc_fork proc_exec span_start span_stop
+      path_open
+      sock_connect dns_req odd_socket
+      ssl_write
+      dlopen mmap_exec
+      task_kill
+      setid_change capable_check bprm_creds
+    ],
+    payload: {
+      "path_open" => %r{\A"?/(?:home|root|etc|proc)(?:/|"|\z)}
+    }
+  }.freeze
 
   CAPABILITY_NAMES = {
     0 => "CAP_CHOWN",
@@ -2126,13 +2164,24 @@ module Vivarium
       else
         "#{tp.defined_class}##{tp.method_id}"
       end
-      is_target = allowlist.include?(signature) || \
+
+      recv = tp.self
+      mid = tp.method_id
+      file_dir_name =
+        if (recv.is_a?(Class) ? recv <= File : recv.is_a?(File)) && SPAN_FILE_METHODS.include?(mid)
+          "File"
+        elsif (recv.is_a?(Class) ? recv <= Dir : recv.is_a?(Dir)) && SPAN_DIR_METHODS.include?(mid)
+          "Dir"
+        end
+
+      is_target = !file_dir_name.nil? || \
+        allowlist.include?(signature) || \
         allow_classes.any? { |klass| tp.defined_class == klass } || \
         allow_classes.any? { |klass| tp.defined_class == klass.singleton_class }
       next unless is_target
 
       file_arg = tail_fit_string(tp.path, SPAN_FILE_ARG_MAX)
-      span_class_name = tp.self.equal?(ENV) ? "ENV" : tp.defined_class.to_s
+      span_class_name = tp.self.equal?(ENV) ? "ENV" : (file_dir_name || tp.defined_class.to_s)
       case tp.event
       when :call, :c_call
         Vivarium::Usdt.start(span_class_name, tp.method_id.to_s, file: file_arg, lineno: tp.lineno)

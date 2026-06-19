@@ -12,16 +12,7 @@ module Vivarium
   #   result = box::MyClass.new.foo  # automatically traced if Vivarium.observe is active
   #
   class Box < Module
-    DEFAULT_FILTER = {
-      include_events: %w[
-        proc_fork proc_exec span_start span_stop
-        sock_connect dns_req odd_socket
-        ssl_write
-        dlopen mmap_exec
-        task_kill
-        setid_change capable_check bprm_creds
-      ]
-    }
+    DEFAULT_FILTER = Vivarium::DEFAULT_FILTER
 
     def initialize(socket_path: Vivarium.socket_path, dest: $stdout, filter: DEFAULT_FILTER)
       super()
