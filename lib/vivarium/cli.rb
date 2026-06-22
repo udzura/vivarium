@@ -32,7 +32,8 @@ module Vivarium
       abort "Usage: vivarium load <script>" unless script
       abort "File not found: #{script}" unless File.exist?(script)
 
-      Vivarium.observe(socket_path: options[:socket_path], dest: options[:dest]) do
+      Vivarium.observe(socket_path: options[:socket_path], dest: options[:dest],
+                       filter: Vivarium::DEFAULT_FILTER) do
         Kernel.load(File.expand_path(script))
       end
     end
