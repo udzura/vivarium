@@ -17,11 +17,7 @@ The goal is to visualize which Ruby method context triggered low-level events.
 
 Implemented in this repository:
 
-- BPF LSM hook on `file_open`
-- BPF LSM hooks on `inode_symlink`, `inode_link`, `inode_rename`, `path_chmod`
-- BPF tracepoint on `sys_enter_getdents64`
-- BPF tracepoint on `sys_enter_execve` (captures executable path and first few argv entries as `proc_exec`)
-- BPF tracepoint on `sched_process_fork` (tracks descendants and emits `proc_fork`)
+ BPF LSM hooks on `inode_symlink`, `inode_link`, `inode_rename`, `inode_unlink` (filename and parent directory name are captured as reference information only), `path_chmod`
 - BPF LSM hooks for suspicious behavior checks:
 	- `ptrace_access_check` (emits `ptrace_check`)
 	- `sb_mount` (emits `sb_mount`)
@@ -113,7 +109,7 @@ This demo intentionally triggers `sock_connect`, `dns_req`, and `odd_socket` eve
 bundle exec ruby examples/file_operation_demo.rb
 ```
 
-This demo intentionally triggers `path_open`, `file_symlink`, `file_hardlink`, `file_rename`, `file_chmod`, and `file_getdents` events under `/tmp`.
+This demo intentionally triggers `path_open`, `file_symlink`, `file_hardlink`, `file_rename`, `file_chmod`, `file_unlink`, and `file_getdents` events under `/tmp`.
 
 5) Execve demo client:
 
