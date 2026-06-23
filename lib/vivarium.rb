@@ -330,6 +330,15 @@ module Vivarium
     "old_name=#{old_name.inspect} new_name=#{new_name.inspect}"
   end
 
+  def self.decode_file_unlink_payload(raw_payload)
+    bytes = raw_payload.to_s.b
+     filename = c_string(bytes[0, 128])
+     parent_dir = c_string(bytes[128, 128])
+     result = "filename=#{filename.inspect}"
+     result += " parent_dir=#{parent_dir.inspect}" if !parent_dir.empty?
+     result
+  end
+
   def self.decode_file_chmod_payload(raw_payload)
     bytes = raw_payload.to_s.b
     return "" if bytes.bytesize < 2
@@ -563,6 +572,9 @@ module Vivarium
     when "file_rename"
       decoded = decode_file_rename_payload(event.payload)
       decoded.empty? ? event.payload.inspect : decoded
+    when "file_unlink"
+      decoded = decode_file_unlink_payload(event.payload)
+      decoded.empty? ? event.payload.inspect : decoded
     when "file_chmod"
       decoded = decode_file_chmod_payload(event.payload)
       decoded.empty? ? event.payload.inspect : decoded
@@ -638,6 +650,11 @@ module Vivarium
       struct dentry_base {
         char __pad[__VIVARIUM_DENTRY_D_NAME_OFFSET__];
         struct qstr d_name;
+      };
+
+      struct dentry {
+        char __pad[__VIVARIUM_DENTRY_D_PARENT_OFFSET__];
+        struct dentry *d_parent;
       };
 
       struct sockaddr_t {
@@ -1423,6 +1440,33 @@ module Vivarium
         return 0;
       }
 
+      LSM_PROBE(inode_unlink, struct inode *dir, struct dentry *dentry)
+      {
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+
+        if (!target_enabled(pid, tid)) {
+          return 0;
+        }
+
+        struct event_t ev = {};
+        ev.pid = pid;
+        __builtin_memcpy(ev.event_name, "file_unlink", 12);
+
+        if (dentry) {
+           read_dentry_name(dentry, &ev.payload[0], 128);
+         
+           struct dentry *parent = dentry->d_parent;
+           if (parent && parent != dentry) {
+             read_dentry_name(parent, &ev.payload[128], 128);
+           }
+        }
+
+        submit_event(&ev);
+        return 0;
+      }
+
       LSM_PROBE(path_chmod, struct path *path, umode_t mode)
       {
         u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -1717,9 +1761,11 @@ module Vivarium
 
       f_path_offset = detect_f_path_offset
       d_name_offset = detect_dentry_d_name_offset
+      d_parent_offset = detect_dentry_d_parent_offset
       program = BPF_PROGRAM_TEMPLATE
         .gsub("__VIVARIUM_F_PATH_OFFSET__", f_path_offset.to_s)
         .gsub("__VIVARIUM_DENTRY_D_NAME_OFFSET__", d_name_offset.to_s)
+        .gsub("__VIVARIUM_DENTRY_D_PARENT_OFFSET__", d_parent_offset.to_s)
 
       usdt_so_paths = resolve_usdt_so_paths
       usdt_contexts = build_usdt_contexts(usdt_so_paths)
@@ -1756,6 +1802,7 @@ module Vivarium
       puts "[vivariumd] started"
       puts "[vivariumd] pinned maps in #{@pin_dir}"
       puts "[vivariumd] watching LSM file_open (f_path offset=#{f_path_offset})"
+      puts "[vivariumd] watching inode_unlink (d_parent offset=#{d_parent_offset}, d_name offset=#{d_name_offset})"
       puts "[vivariumd] API listening on unix:#{@socket_path}"
 
       loop do
@@ -2061,6 +2108,56 @@ module Vivarium
       32
     rescue Errno::ENOENT
       raise Error, "bpftool is required to resolve struct dentry::d_name offset"
+    end
+
+    def detect_dentry_d_parent_offset
+      env_offset = ENV["VIVARIUM_DENTRY_D_PARENT_OFFSET"]
+      return Integer(env_offset, 10) if env_offset
+
+      raw = IO.popen(
+        %w[bpftool btf dump file /sys/kernel/btf/vmlinux format raw],
+        err: IO::NULL,
+        &:read
+      )
+
+      in_dentry_struct = false
+      d_parent_bits_offset = nil
+
+      raw.each_line do |line|
+        if line =~ /^\[\d+\] STRUCT 'dentry' /
+          in_dentry_struct = true
+          next
+        end
+
+        if in_dentry_struct && line.start_with?("[")
+          break
+        end
+
+        next unless in_dentry_struct
+
+        if (match = line.match(/'d_parent'.*bits_offset=(\d+)/))
+          d_parent_bits_offset = Integer(match[1], 10)
+          break
+        end
+      end
+
+      if d_parent_bits_offset
+        if (d_parent_bits_offset % 8).positive?
+          raise Error, "unsupported d_parent bits offset=#{d_parent_bits_offset}"
+        end
+
+        if d_parent_bits_offset >= 1024
+          warn "[vivariumd] suspicious d_parent offset=#{d_parent_bits_offset / 8}, fallback to offset=0"
+          return 0
+        end
+
+        return d_parent_bits_offset / 8
+      end
+
+      warn "[vivariumd] could not find struct dentry::d_parent in BTF, fallback to offset=0"
+      0
+    rescue Errno::ENOENT
+      raise Error, "bpftool is required to resolve struct dentry::d_parent offset"
     end
   end
 

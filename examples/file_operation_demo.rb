@@ -11,7 +11,7 @@ require "vivarium"
 
 TMP_PREFIX = "vivarium-file-demo"
 FILTER = {
-  include_events: %w[path_open file_symlink file_hardlink file_rename file_chmod file_getdents]
+  include_events: %w[path_open file_symlink file_hardlink file_rename file_chmod file_unlink file_getdents]
 }.freeze
 
 def try_step(title)
@@ -55,6 +55,14 @@ Dir.mktmpdir(TMP_PREFIX, "/tmp") do |dir|
     try_step("chmod file") do
       File.chmod(0o640, renamed_path)
       File.stat(renamed_path)
+    end
+
+    try_step("unlink hardlink") do
+      File.unlink(hardlink_path)
+    end
+
+    try_step("unlink symlink") do
+      File.unlink(symlink_path)
     end
 
     try_step("list directory again") do
