@@ -10,6 +10,9 @@ module Vivarium
     # Grace period after stop to let trailing events drain through the stream.
     DRAIN_SLEEP = 0.3
 
+    # In save_raw mode, emit a progress line every this many captured events.
+    SAVE_RAW_PROGRESS_INTERVAL = 1000
+
     def initialize(socket_path: Vivarium.socket_path, observer_pid:, main_tid:,
                    filter: nil, dest: $stdout, save_raw: nil)
       @socket_path = socket_path
@@ -64,6 +67,7 @@ module Vivarium
         File.open(@save_raw, "wb") do |io|
           Vivarium::RawStore.dump(io, events: events_snapshot, meta: meta)
         end
+        warn "[vivarium] save_raw: saved #{events_snapshot.size} events -> #{@save_raw}"
         return
       end
 
@@ -111,9 +115,17 @@ module Vivarium
 
     def capture_event(bytes)
       ev = Vivarium::RawStore.unpack_record(bytes)
-      @events_mutex.synchronize { @events << ev }
+      count = @events_mutex.synchronize { @events << ev; @events.size }
+      report_save_progress(count)
     rescue StandardError => e
       warn "[vivarium correlator] capture error: #{e.class}: #{e.message}"
+    end
+
+    def report_save_progress(count)
+      return unless @save_raw
+      return unless (count % SAVE_RAW_PROGRESS_INTERVAL).zero?
+
+      warn "[vivarium] save_raw: captured #{count} events -> #{@save_raw}"
     end
   end
 end

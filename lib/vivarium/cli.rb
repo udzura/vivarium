@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "optparse"
+require "json"
 
 module Vivarium
   module CLI
@@ -18,6 +19,10 @@ module Vivarium
         opts.on("-o", "--output PATH", "Log output file (default: stdout)") { |v| options[:dest] = File.open(v, "a") }
         opts.on("--save-raw PATH", "load: save raw events to PATH instead of rendering") { |v| options[:save_raw] = v }
         opts.on("--all", "report: show all events (ignore default filter)") { options[:show_all] = true }
+        opts.on("--filter JSON", "report: filter as a JSON object (overrides --event/default)") { |v| options[:filter_json] = v }
+        opts.on("--event NAMES", "report: comma-separated event names to include") do |v|
+          options[:event_names] = v.split(",").map(&:strip).reject(&:empty?)
+        end
       end
       parser.order!(argv)
 
@@ -55,7 +60,7 @@ module Vivarium
           abort "Invalid vivarium-raw file #{raw}: #{e.message}"
         end
       meta = data[:meta]
-      filter = options[:show_all] ? nil : Vivarium::DEFAULT_FILTER
+      filter = resolve_report_filter(options)
 
       Vivarium::TreeRenderer.new(
         events: data[:events],
@@ -68,6 +73,25 @@ module Vivarium
         filter: filter,
         dest: options[:dest]
       ).render
+    end
+
+    # Resolve the report display filter by precedence:
+    #   --all  >  --filter JSON  >  --event NAMES  >  DEFAULT_FILTER
+    def self.resolve_report_filter(options)
+      return nil if options[:show_all]
+
+      if options[:filter_json]
+        begin
+          return JSON.parse(options[:filter_json])
+        rescue JSON::ParserError => e
+          abort "Invalid --filter JSON: #{e.message}"
+        end
+      end
+
+      names = options[:event_names]
+      return { include_events: names } if names && !names.empty?
+
+      Vivarium::DEFAULT_FILTER
     end
   end
 end
