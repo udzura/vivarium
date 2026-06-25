@@ -2180,15 +2180,15 @@ module Vivarium
     end
   end
 
-  def self.observe(socket_path: self.socket_path, dest: $stdout, filter: nil, &block)
+  def self.observe(socket_path: self.socket_path, dest: $stdout, filter: nil, save_raw: nil, &block)
     if block_given?
-      return scoped_observe(socket_path: socket_path, dest: dest, filter: filter, &block)
+      return scoped_observe(socket_path: socket_path, dest: dest, filter: filter, save_raw: save_raw, &block)
     end
 
-    top_observe(socket_path: socket_path, dest: dest, filter: filter)
+    top_observe(socket_path: socket_path, dest: dest, filter: filter, save_raw: save_raw)
   end
 
-  def self.top_observe(socket_path: self.socket_path, dest: $stdout, filter: nil)
+  def self.top_observe(socket_path: self.socket_path, dest: $stdout, filter: nil, save_raw: nil)
     client = DaemonClient.new(socket_path: socket_path)
     pid = Process.pid
     main_tid = gettid
@@ -2198,7 +2198,8 @@ module Vivarium
       observer_pid: pid,
       main_tid: main_tid,
       filter: filter,
-      dest: dest
+      dest: dest,
+      save_raw: save_raw
     )
     correlator.start
     client.register(pid)
@@ -2213,7 +2214,7 @@ module Vivarium
     session
   end
 
-  def self.scoped_observe(socket_path: self.socket_path, dest:, filter: nil)
+  def self.scoped_observe(socket_path: self.socket_path, dest:, filter: nil, save_raw: nil)
     client = DaemonClient.new(socket_path: socket_path)
     pid = Process.pid
     main_tid = gettid
@@ -2223,7 +2224,8 @@ module Vivarium
       observer_pid: pid,
       main_tid: main_tid,
       filter: filter,
-      dest: dest
+      dest: dest,
+      save_raw: save_raw
     )
     correlator.start
     client.register(pid)
@@ -2357,6 +2359,7 @@ end
 
 require_relative "vivarium/daemon_client"
 require_relative "vivarium/api_server"
+require_relative "vivarium/raw_store"
 require_relative "vivarium/correlator"
 require_relative "vivarium/display_filter"
 require_relative "vivarium/tree_renderer"

@@ -7,21 +7,20 @@ module Vivarium
   # Unix domain socket, reads chunked raw event_t records, accumulates them, and
   # renders a tree on stop. It never touches BPF maps or the ring buffer directly.
   class Correlator
-    RawEvent = Struct.new(
-      :ktime_ns, :pid, :tid, :event_name, :payload, :dropped_since_last,
-      keyword_init: true
-    )
-
     # Grace period after stop to let trailing events drain through the stream.
     DRAIN_SLEEP = 0.3
 
+    # In save_raw mode, emit a progress line every this many captured events.
+    SAVE_RAW_PROGRESS_INTERVAL = 1000
+
     def initialize(socket_path: Vivarium.socket_path, observer_pid:, main_tid:,
-                   filter: nil, dest: $stdout)
+                   filter: nil, dest: $stdout, save_raw: nil)
       @socket_path = socket_path
       @observer_pid = observer_pid
       @main_tid = main_tid
       @filter = filter
       @dest = dest
+      @save_raw = save_raw
 
       @client = DaemonClient.new(socket_path: socket_path)
       @events = []
@@ -55,17 +54,24 @@ module Vivarium
       events_snapshot = @events_mutex.synchronize { @events.dup }
       @stopped = true
 
-      TreeRenderer.new(
-        events: events_snapshot,
+      meta = {
         observer_pid: @observer_pid,
         main_tid: @main_tid,
         session_start_iso: @session_start_iso,
         session_start_ktime: @session_start_ktime,
         session_stop_iso: @session_stop_iso,
-        session_stop_ktime: @session_stop_ktime,
-        filter: @filter,
-        dest: @dest
-      ).render
+        session_stop_ktime: @session_stop_ktime
+      }
+
+      if @save_raw
+        File.open(@save_raw, "wb") do |io|
+          Vivarium::RawStore.dump(io, events: events_snapshot, meta: meta)
+        end
+        warn "[vivarium] save_raw: saved #{events_snapshot.size} events -> #{@save_raw}"
+        return
+      end
+
+      TreeRenderer.new(events: events_snapshot, **meta, filter: @filter, dest: @dest).render
     end
 
     private
@@ -108,28 +114,18 @@ module Vivarium
     end
 
     def capture_event(bytes)
-      bytes = bytes.to_s.b
-      bytes = bytes.ljust(Vivarium::EVENT_STRUCT_SIZE, "\x00") if bytes.bytesize < Vivarium::EVENT_STRUCT_SIZE
-
-      ktime_ns           = bytes[Vivarium::EVENT_TS_OFFSET,      Vivarium::EVENT_TS_SIZE].unpack1("Q<")
-      pid                = bytes[Vivarium::EVENT_PID_OFFSET,     4].unpack1("L<")
-      tid                = bytes[Vivarium::EVENT_TID_OFFSET,     4].unpack1("L<")
-      event_name         = Vivarium.c_string(bytes[Vivarium::EVENT_NAME_OFFSET, Vivarium::EVENT_NAME_SIZE])
-      payload            = bytes[Vivarium::EVENT_PAYLOAD_OFFSET, Vivarium::EVENT_PAYLOAD_SIZE].to_s.b
-      dropped_since_last = bytes[Vivarium::EVENT_DROPPED_OFFSET, 8].unpack1("Q<")
-
-      @events_mutex.synchronize do
-        @events << RawEvent.new(
-          ktime_ns: ktime_ns,
-          pid: pid,
-          tid: tid,
-          event_name: event_name,
-          payload: payload,
-          dropped_since_last: dropped_since_last
-        )
-      end
+      ev = Vivarium::RawStore.unpack_record(bytes)
+      count = @events_mutex.synchronize { @events << ev; @events.size }
+      report_save_progress(count)
     rescue StandardError => e
       warn "[vivarium correlator] capture error: #{e.class}: #{e.message}"
+    end
+
+    def report_save_progress(count)
+      return unless @save_raw
+      return unless (count % SAVE_RAW_PROGRESS_INTERVAL).zero?
+
+      warn "[vivarium] save_raw: captured #{count} events -> #{@save_raw}"
     end
   end
 end
