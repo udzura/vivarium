@@ -23,6 +23,9 @@ module Vivarium
         opts.on("--event NAMES", "report: comma-separated event names to include") do |v|
           options[:event_names] = v.split(",").map(&:strip).reject(&:empty?)
         end
+        opts.on("--max-span-depth N", Integer, "report: collapse method spans deeper than N (events kept)") do |v|
+          options[:max_span_depth] = v
+        end
       end
       parser.order!(argv)
 
@@ -61,6 +64,9 @@ module Vivarium
         end
       meta = data[:meta]
       filter = resolve_report_filter(options)
+      if options[:max_span_depth]
+        filter = (filter || {}).merge(max_span_depth: options[:max_span_depth])
+      end
 
       Vivarium::TreeRenderer.new(
         events: data[:events],

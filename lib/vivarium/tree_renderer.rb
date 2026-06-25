@@ -84,6 +84,8 @@ module Vivarium
       all_spans_for_assign = (synthetic_spans + real_spans).sort_by { |s| s.start_ktime || 0 }
       assign_events_to_spans(all_spans_for_assign, sorted)
 
+      collapse_deep_spans(root_real_spans)
+
       print_header
       print_warnings
       print_observer_proc(root_with_synthetics)
@@ -140,6 +142,47 @@ module Vivarium
 
       closed.sort_by!(&:start_ktime)
       [closed, children_map]
+    end
+
+    # Trim method-call span nesting deeper than @display_filter.max_span_depth.
+    # The deep span frames are dropped, but their events are promoted onto the
+    # deepest still-visible ancestor span so no security-relevant event is lost.
+    def collapse_deep_spans(root_real_spans)
+      max = @display_filter.max_span_depth
+      return unless max
+
+      depth = {}
+      stack = root_real_spans.map { |s| [s, 1] }
+      until stack.empty?
+        span, d = stack.pop
+        depth[span] = d
+        (@children_map[span] || []).each { |child| stack.push([child, d + 1]) }
+      end
+
+      depth.each do |span, d|
+        next unless d == max
+
+        descendants = collect_descendant_spans(span)
+        next if descendants.empty?
+
+        descendants.each do |desc|
+          span.events.concat(desc.events)
+          desc.events = []
+        end
+        span.events.sort_by!(&:ktime_ns)
+        @children_map[span] = []
+      end
+    end
+
+    def collect_descendant_spans(span)
+      result = []
+      stack = (@children_map[span] || []).dup
+      until stack.empty?
+        child = stack.pop
+        result << child
+        stack.concat(@children_map[child] || [])
+      end
+      result
     end
 
     def assign_descendants(spans, events)
