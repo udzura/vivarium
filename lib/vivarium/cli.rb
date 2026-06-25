@@ -48,7 +48,12 @@ module Vivarium
       abort "Usage: vivarium report <raw-file>" unless raw
       abort "File not found: #{raw}" unless File.exist?(raw)
 
-      data = File.open(raw, "rb") { |io| Vivarium::RawStore.load(io) }
+      data =
+        begin
+          File.open(raw, "rb") { |io| Vivarium::RawStore.load(io) }
+        rescue Vivarium::RawStore::FormatError => e
+          abort "Invalid vivarium-raw file #{raw}: #{e.message}"
+        end
       meta = data[:meta]
       filter = options[:show_all] ? nil : Vivarium::DEFAULT_FILTER
 

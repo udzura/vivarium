@@ -12,6 +12,9 @@ module Vivarium
   # followed by fixed-size (EVENT_STRUCT_SIZE) event_t records. The record layout
   # mirrors the C struct event_t so it round-trips losslessly.
   module RawStore
+    # Raised when a file is not a valid vivarium-raw capture.
+    class FormatError < StandardError; end
+
     FORMAT = "vivarium-raw"
     VERSION = 1
     PACK_FMT = "Q<L<L<a16a256Q<" # struct event_t (296B)
@@ -55,11 +58,16 @@ module Vivarium
     def self.load(io)
       io.binmode
       line = io.gets
-      raise "empty raw file" if line.nil?
+      raise FormatError, "empty file" if line.nil?
 
-      meta = JSON.parse(line, symbolize_names: true)
+      begin
+        meta = JSON.parse(line, symbolize_names: true)
+      rescue JSON::ParserError => e
+        raise FormatError, "header is not valid JSON: #{e.message}"
+      end
+      raise FormatError, "missing JSON object header" unless meta.is_a?(Hash)
       unless meta[:format] == FORMAT
-        raise "not a vivarium-raw file (format=#{meta[:format].inspect})"
+        raise FormatError, "format=#{meta[:format].inspect} (expected #{FORMAT.inspect})"
       end
 
       events = []
