@@ -14,7 +14,7 @@ module Vivarium
   module OtelExporter
     SPAN_KIND_INTERNAL = 1
     SERVICE_NAME = "vivarium"
-    INTERNAL_COMM_MATCH = [/otel_stream\.rb/].freeze
+    INTERNAL_COMM_MATCH = [/otel_stream\.rb/, /correlator\.rb/].freeze
     CONTROL_EVENT_NAMES = %w[proc_exit].freeze
 
     module_function
