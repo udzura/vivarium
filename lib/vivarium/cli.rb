@@ -30,9 +30,17 @@ module Vivarium
           options[:dedup_values] = true
         end
       end
-      parser.order!(argv)
+      # order! stops at the first non-option (the subcommand), so parse once to
+      # collect options before the command, then again to collect options placed
+      # after it (e.g. `vivarium report --dedup-values FILE`).
+      begin
+        parser.order!(argv)
+        command = argv.shift
+        parser.order!(argv) if command
+      rescue OptionParser::ParseError => e
+        abort "#{e.message}\n\n#{parser.help}"
+      end
 
-      command = argv.shift
       case command
       when "load"
         run_load!(argv, options)
