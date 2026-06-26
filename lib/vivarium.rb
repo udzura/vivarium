@@ -1002,7 +1002,15 @@ module Vivarium
 
       TRACEPOINT_PROBE(sched, sched_process_exit)
       {
-        u32 tid = (u32)bpf_get_current_pid_tgid();
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+        if (target_enabled(pid, tid)) {
+          struct event_t ev = {};
+          ev.pid = pid;
+          __builtin_memcpy(ev.event_name, "proc_exit", 10);
+          submit_event(&ev);
+        }
         config_spawned_targets.delete(&tid);
         dns_connected_tids.delete(&tid);
         otel_ctx.delete(&tid);

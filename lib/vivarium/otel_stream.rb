@@ -104,6 +104,7 @@ module Vivarium
   class OtelSpanStreamer
     SESSION_ROOT_SALT = 0x766976617269756d
     THREAD_ROOT_SALT = 0x7468726561640000
+    PROCESS_EXIT_EVENT_NAME = "proc_exit"
 
     def initialize(exporter:, session_start_iso:, session_start_ktime:, observer_pid:, main_tid:)
       @exporter = exporter
@@ -117,6 +118,7 @@ module Vivarium
       @session_span_id = Vivarium.synth_span_id(@trace_hi, @trace_lo, observer_pid, start_ktime ^ SESSION_ROOT_SALT)
       @stacks = Hash.new { |h, k| h[k] = [] }
       @thread_spans = {}
+      @bpf_thread_span_ids = {}
     end
 
     def on_event(ev)
@@ -134,7 +136,7 @@ module Vivarium
       @stacks.each_value do |stack|
         emit_method_span(stack.pop, stop_ktime) until stack.empty?
       end
-      @thread_spans.each_value { |rec| emit_thread_span(rec, stop_ktime) }
+      @thread_spans.each_value { |rec| emit_thread_span(rec, stop_ktime) unless rec[:emitted] }
       emit_session_span(stop_ktime)
     end
 
@@ -162,6 +164,11 @@ module Vivarium
 
     def handle_event(ev)
       thread = touch_thread_span(ev)
+      if ev.event_name == PROCESS_EXIT_EVENT_NAME
+        emit_thread_span(thread, ev.ktime_ns) unless thread[:root]
+        return
+      end
+
       stack = @stacks[ev.tid]
       if stack.empty?
         thread[:events] << Vivarium::OtelExporter.build_span_event(ev, @to_unix)
@@ -172,6 +179,7 @@ module Vivarium
 
     def touch_thread_span(ev)
       rec = (@thread_spans[ev.tid] ||= new_thread_span(ev))
+      remember_bpf_thread_span(ev, rec)
       rec[:comm] = ev.comm.to_s unless ev.comm.to_s.empty?
       rec[:min_k] = ev.ktime_ns if ev.ktime_ns < rec[:min_k]
       rec[:max_k] = ev.ktime_ns if ev.ktime_ns > rec[:max_k]
@@ -181,11 +189,36 @@ module Vivarium
     def new_thread_span(ev)
       {
         tid: ev.tid, pid: ev.pid, comm: ev.comm.to_s,
-        span_id: Vivarium.synth_span_id(@trace_hi ^ THREAD_ROOT_SALT, @trace_lo, ev.tid, ev.ktime_ns),
+        span_id: thread_span_id(ev),
+        bpf_parent_span_id: ev.parent_span_id.to_i,
+        parent: ev.tid == @main_tid ? @session_span_id : nil,
         min_k: ev.ktime_ns, max_k: ev.ktime_ns,
         root: ev.tid == @main_tid,
-        events: []
+        events: [], emitted: false
       }
+    end
+
+    def thread_span_id(ev)
+      span_id = ev.span_id.to_i
+      return span_id unless span_id.zero?
+
+      Vivarium.synth_span_id(@trace_hi ^ THREAD_ROOT_SALT, @trace_lo, ev.tid, ev.ktime_ns)
+    end
+
+    def remember_bpf_thread_span(ev, rec)
+      bpf_span_id = ev.span_id.to_i
+      @bpf_thread_span_ids[bpf_span_id] = rec[:span_id] unless bpf_span_id.zero?
+
+      bpf_parent_span_id = ev.parent_span_id.to_i
+      rec[:bpf_parent_span_id] = bpf_parent_span_id unless bpf_parent_span_id.zero?
+    end
+
+    def thread_parent_span_id(rec)
+      parent = rec[:parent]
+      return parent if parent
+
+      mapped = @bpf_thread_span_ids[rec[:bpf_parent_span_id]]
+      mapped && mapped != rec[:span_id] ? mapped : @session_span_id
     end
 
     def emit_method_span(rec, end_k)
@@ -206,8 +239,10 @@ module Vivarium
     end
 
     def emit_thread_span(rec, stop_ktime)
+      return if rec[:emitted]
+
       start_k = rec[:root] ? @session_start_ktime : rec[:min_k]
-      stop_k = rec[:root] ? stop_ktime : rec[:max_k]
+      stop_k = rec[:root] ? stop_ktime : [rec[:max_k], stop_ktime].compact.max
       name = rec[:comm].empty? ? "tid=#{rec[:tid]}" : rec[:comm]
       attrs = [
         Vivarium::OtelExporter.int_attr("thread.id", rec[:tid]),
@@ -216,11 +251,12 @@ module Vivarium
       attrs << Vivarium::OtelExporter.str_attr("process.command", rec[:comm]) unless rec[:comm].empty?
       @exporter.enqueue(
         Vivarium::OtelExporter.span_hash(
-          trace_hi: @trace_hi, trace_lo: @trace_lo, span_id: rec[:span_id], parent: @session_span_id,
+          trace_hi: @trace_hi, trace_lo: @trace_lo, span_id: rec[:span_id], parent: thread_parent_span_id(rec),
           name: name, start_k: start_k, stop_k: stop_k,
           to_unix: @to_unix, attributes: attrs, events: rec[:events]
         )
       )
+      rec[:emitted] = true
     end
 
     def emit_session_span(stop_ktime)

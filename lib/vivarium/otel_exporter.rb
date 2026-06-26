@@ -15,6 +15,7 @@ module Vivarium
     SPAN_KIND_INTERNAL = 1
     SERVICE_NAME = "vivarium"
     INTERNAL_COMM_MATCH = [/otel_stream\.rb/].freeze
+    CONTROL_EVENT_NAMES = %w[proc_exit].freeze
 
     module_function
 
@@ -61,6 +62,7 @@ module Vivarium
 
       sorted.each do |ev|
         next if internal_comm?(ev.comm)
+        next if control_event?(ev.event_name)
 
         ts = (thread_spans[ev.tid] ||= new_thread_span(ev, main_tid))
         ts[:comm] = ev.comm.to_s unless ev.comm.to_s.empty?
@@ -186,6 +188,10 @@ module Vivarium
     def internal_comm?(comm)
       value = comm.to_s
       INTERNAL_COMM_MATCH.any? { |regex| value.match?(regex) }
+    end
+
+    def control_event?(event_name)
+      CONTROL_EVENT_NAMES.include?(event_name.to_s)
     end
 
     def read_span_payload(payload)
