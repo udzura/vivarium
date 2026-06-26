@@ -6,6 +6,7 @@ require "net/http"
 require "optparse"
 require "pathname"
 require "rbbcc"
+require "securerandom"
 require "set"
 require "socket"
 if defined?(Ruby) && defined?(Ruby::Box) && Ruby::Box.enabled?
@@ -31,15 +32,23 @@ module Vivarium
   EVENT_NAME_SIZE = 16
   EVENT_PAYLOAD_SIZE = 256
   EVENT_TS_SIZE = 8
+  EVENT_COMM_SIZE = 16
   PROC_EXEC_SLOT_SIZE = 64
   PROC_EXEC_SLOT_COUNT = 4
-  EVENT_STRUCT_SIZE = 296
+  EVENT_STRUCT_SIZE = 352
   EVENT_TS_OFFSET = 0
   EVENT_PID_OFFSET = 8
   EVENT_TID_OFFSET = 12
-  EVENT_NAME_OFFSET = 16
-  EVENT_PAYLOAD_OFFSET = 32
-  EVENT_DROPPED_OFFSET = 288
+  EVENT_UID_OFFSET = 16
+  EVENT_GID_OFFSET = 20
+  EVENT_TRACE_HI_OFFSET = 24
+  EVENT_TRACE_LO_OFFSET = 32
+  EVENT_SPAN_OFFSET = 40
+  EVENT_PARENT_SPAN_OFFSET = 48
+  EVENT_COMM_OFFSET = 56
+  EVENT_NAME_OFFSET = 72
+  EVENT_PAYLOAD_OFFSET = 88
+  EVENT_DROPPED_OFFSET = 344
   EVENTS_RINGBUF_PAGES = 256
 
   SPAN_METHOD_SIZE     = 128
@@ -711,20 +720,46 @@ module Vivarium
         u16 transport_header;
       };
 
+      // trace_id is a 128-bit value carried as two u64 halves (hi/lo). They are
+      // kept as flat scalar fields (not a nested struct) because rbbcc/Fiddle's
+      // CParser cannot decode nested-struct members of a BPF map value type.
       struct event_t {
         u64 ktime_ns;
         u32 pid;
         u32 tid;
+        u32 uid;
+        u32 gid;
+        u64 trace_id_hi;
+        u64 trace_id_lo;
+        u64 span_id;
+        u64 parent_span_id;
+        char comm[#{EVENT_COMM_SIZE}];
         char event_name[16];
         char payload[#{EVENT_PAYLOAD_SIZE}];
         u64 dropped_since_last;
       };
 
+      // Per-thread OpenTelemetry context. trace_id (hi/lo) is issued by userspace
+      // at target registration and inherited by spawned children; span_id is
+      // re-issued per tid (root in userspace, children at fork).
+      struct otel_ctx_t {
+        u64 trace_id_hi;
+        u64 trace_id_lo;
+        u64 span_id;
+        u64 parent_span_id;
+      };
+
       BPF_HASH(config_root_targets, u32, u8, 1024);
       BPF_HASH(config_spawned_targets, u32, u8, 8192);
       BPF_HASH(dns_connected_tids, u32, u8, 8192);
+      BPF_HASH(otel_ctx, u32, struct otel_ctx_t, 8192);
       BPF_RINGBUF_OUTPUT(events, #{EVENTS_RINGBUF_PAGES});
       BPF_ARRAY(drop_counter, u64, 1);
+
+      static __always_inline u64 rand_span_id()
+      {
+        return ((u64)bpf_get_prandom_u32() << 32) | (u64)bpf_get_prandom_u32();
+      }
 
       static __always_inline int target_enabled(u32 pid, u32 tid)
       {
@@ -782,6 +817,20 @@ module Vivarium
         ev->ktime_ns = bpf_ktime_get_ns();
         ev->tid = (u32)bpf_get_current_pid_tgid();
         ev->dropped_since_last = 0;
+
+        u64 uid_gid = bpf_get_current_uid_gid();
+        ev->uid = (u32)uid_gid;
+        ev->gid = (u32)(uid_gid >> 32);
+        bpf_get_current_comm(&ev->comm, sizeof(ev->comm));
+
+        u32 ctid = (u32)bpf_get_current_pid_tgid();
+        struct otel_ctx_t *octx = otel_ctx.lookup(&ctid);
+        if (octx) {
+          ev->trace_id_hi = octx->trace_id_hi;
+          ev->trace_id_lo = octx->trace_id_lo;
+          ev->span_id = octx->span_id;
+          ev->parent_span_id = octx->parent_span_id;
+        }
 
         cnt = drop_counter.lookup(&key);
         if (cnt && *cnt > 0) {
@@ -895,11 +944,26 @@ module Vivarium
 
         if (is_target) {
           u64 pid_tgid = bpf_get_current_pid_tgid();
+
+          // Re-issue a fresh span_id for the child, inheriting the parent's
+          // trace_id and linking the child's parent_span_id to the parent span.
+          u32 parent_tid = (u32)pid_tgid;
+          struct otel_ctx_t *pctx = otel_ctx.lookup(&parent_tid);
+          struct otel_ctx_t cctx = {};
+          u64 child_span = rand_span_id();
+          if (pctx) {
+            cctx.trace_id_hi = pctx->trace_id_hi;
+            cctx.trace_id_lo = pctx->trace_id_lo;
+            cctx.parent_span_id = pctx->span_id;
+          }
+          cctx.span_id = child_span;
+          otel_ctx.update(&child, &cctx);
+
           struct event_t ev = {};
           ev.pid = pid_tgid >> 32;
           __builtin_memcpy(ev.event_name, "proc_fork", 10);
           __builtin_memcpy(&ev.payload[0], &child, sizeof(child));
-          __builtin_memcpy(&ev.payload[4], &child, sizeof(child));
+          __builtin_memcpy(&ev.payload[8], &child_span, sizeof(child_span));
           submit_event(&ev);
         }
 
@@ -911,6 +975,7 @@ module Vivarium
         u32 tid = (u32)bpf_get_current_pid_tgid();
         config_spawned_targets.delete(&tid);
         dns_connected_tids.delete(&tid);
+        otel_ctx.delete(&tid);
         return 0;
       }
 
@@ -1779,16 +1844,18 @@ module Vivarium
 
       config_root_targets = bpf["config_root_targets"]
       config_spawned_targets = bpf["config_spawned_targets"]
+      otel_ctx = bpf["otel_ctx"]
       events_ringbuf = bpf["events"]
 
       config_spawned_targets.clear
+      otel_ctx.clear
 
       pin_map(config_root_targets, File.join(@pin_dir, "config_root_targets"))
       pin_map(config_spawned_targets, File.join(@pin_dir, "config_spawned_targets"))
       pin_map(events_ringbuf, File.join(@pin_dir, "events"))
 
       event_log = EventLog.new
-      registry = Registry.new(config_root_targets, config_spawned_targets)
+      registry = Registry.new(config_root_targets, config_spawned_targets, otel_ctx)
       start_ringbuf_poller(bpf, events_ringbuf, event_log)
 
       @api_server = ApiServer.new(
