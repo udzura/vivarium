@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "fiddle"
+require "securerandom"
 require "socket"
 
 module Vivarium
@@ -43,20 +45,43 @@ module Vivarium
 
   # Wraps the daemon's live BPF target maps so the API can (un)register PIDs.
   class Registry
-    def initialize(config_root_targets, config_spawned_targets)
+    # struct otel_ctx_t { trace_id{u64 hi; u64 lo}; u64 span_id; u64 parent_span_id; }
+    OTEL_CTX_PACK_FMT = "Q<Q<Q<Q<"
+
+    def initialize(config_root_targets, config_spawned_targets, otel_ctx = nil)
       @config_root_targets = config_root_targets
       @config_spawned_targets = config_spawned_targets
+      @otel_ctx = otel_ctx
     end
 
+    # Registering a root target marks the start of a trace: issue a fresh
+    # 128-bit trace_id and a root span_id (no parent) into the otel_ctx map,
+    # keyed by the root pid (== the main thread's tid).
     def register(pid)
       @config_root_targets[pid] = 1
+      return unless @otel_ctx
+
+      hi = SecureRandom.random_number(1 << 64)
+      lo = SecureRandom.random_number(1 << 64)
+      span = SecureRandom.random_number(1 << 64)
+      write_otel_ctx(pid, hi, lo, span, 0)
     end
 
     def unregister(pid)
       @config_root_targets.delete(pid)
       @config_spawned_targets.clear
+      @otel_ctx&.clear
     rescue KeyError
       nil
+    end
+
+    private
+
+    def write_otel_ctx(tid, trace_hi, trace_lo, span_id, parent_span_id)
+      size = @otel_ctx.leafsize
+      ptr = Fiddle::Pointer.malloc(size)
+      ptr[0, size] = [trace_hi, trace_lo, span_id, parent_span_id].pack(OTEL_CTX_PACK_FMT)
+      @otel_ctx[tid] = ptr
     end
   end
 
