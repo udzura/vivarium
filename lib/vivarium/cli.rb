@@ -18,15 +18,15 @@ module Vivarium
         opts.on("--socket PATH", "vivariumd Unix domain socket path") { |v| options[:socket_path] = v }
         opts.on("-o", "--output PATH", "Log output file (default: stdout)") { |v| options[:dest] = File.open(v, "a") }
         opts.on("--save-raw PATH", "load: save raw events to PATH instead of rendering") { |v| options[:save_raw] = v }
-        opts.on("--all", "report: show all events (ignore default filter)") { options[:show_all] = true }
+        opts.on("-a", "--all", "report: show all events (ignore default filter)") { options[:show_all] = true }
         opts.on("--filter JSON", "report: filter as a JSON object (overrides --event/default)") { |v| options[:filter_json] = v }
-        opts.on("--event NAMES", "report: comma-separated event names to include") do |v|
+        opts.on("-e", "--event NAMES", "report: comma-separated event names to include") do |v|
           options[:event_names] = v.split(",").map(&:strip).reject(&:empty?)
         end
-        opts.on("--max-span-depth N", Integer, "report: collapse method spans deeper than N (events kept)") do |v|
+        opts.on("-d", "--max-span-depth N", Integer, "report: collapse method spans deeper than N (events kept)") do |v|
           options[:max_span_depth] = v
         end
-        opts.on("--dedup-values", "load/report: show repeated path_open/mmap_exec/dlopen/env_caccess values only once") do
+        opts.on("-u", "--dedup-values", "load/report: show repeated path_open/mmap_exec/dlopen/env_caccess values only once") do
           options[:dedup_values] = true
         end
       end
