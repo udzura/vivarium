@@ -29,8 +29,8 @@ module Vivarium
         opts.on("-u", "--dedup-values", "load/report: show repeated path_open/mmap_exec/dlopen/env_caccess values only once") do
           options[:dedup_values] = true
         end
-        opts.on("--otel-debug", "report: [debug] dump per-event otel fields (trace/span/uid/gid/comm) instead of the tree") do
-          options[:otel_debug] = true
+        opts.on("--dump-otel", "report: dump per-event otel fields (trace/span/uid/gid/comm) instead of the tree") do
+          options[:dump_otel] = true
         end
       end
       # order! stops at the first non-option (the subcommand), so parse once to
@@ -81,7 +81,7 @@ module Vivarium
         end
       meta = data[:meta]
 
-      if options[:otel_debug]
+      if options[:dump_otel]
         dump_otel(data[:events], options[:dest])
         return
       end
