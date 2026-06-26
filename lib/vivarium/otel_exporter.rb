@@ -14,6 +14,7 @@ module Vivarium
   module OtelExporter
     SPAN_KIND_INTERNAL = 1
     SERVICE_NAME = "vivarium"
+    INTERNAL_COMM_MATCH = [/otel_stream\.rb/].freeze
 
     module_function
 
@@ -59,6 +60,8 @@ module Vivarium
       stacks = Hash.new { |h, k| h[k] = [] } # tid => [method span record, ...]
 
       sorted.each do |ev|
+        next if internal_comm?(ev.comm)
+
         ts = (thread_spans[ev.tid] ||= new_thread_span(ev, main_tid))
         ts[:comm] = ev.comm.to_s unless ev.comm.to_s.empty?
         ts[:min_k] = ev.ktime_ns if ev.ktime_ns < ts[:min_k]
@@ -179,6 +182,11 @@ module Vivarium
     end
 
     # --- helpers -------------------------------------------------------------
+
+    def internal_comm?(comm)
+      value = comm.to_s
+      INTERNAL_COMM_MATCH.any? { |regex| value.match?(regex) }
+    end
 
     def read_span_payload(payload)
       bytes = payload.to_s.b

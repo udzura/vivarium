@@ -120,6 +120,8 @@ module Vivarium
     end
 
     def on_event(ev)
+      return if Vivarium::OtelExporter.internal_comm?(ev.comm)
+
       case ev.event_name
       when "span_start" then handle_start(ev)
       when "span_stop" then handle_stop(ev)
