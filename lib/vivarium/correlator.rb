@@ -137,7 +137,9 @@ module Vivarium
       @stream = Vivarium::OtelSpanStreamer.new(
         exporter: @stream_exporter,
         session_start_iso: @session_start_iso,
-        session_start_ktime: @session_start_ktime
+        session_start_ktime: @session_start_ktime,
+        observer_pid: @observer_pid,
+        main_tid: @main_tid
       )
     end
 
