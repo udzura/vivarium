@@ -5,7 +5,7 @@ require "set"
 module Vivarium
   class DisplayFilter
     attr_reader :include_events, :exclude_events, :include_severities, :include_pids, :include_tids,
-                :max_span_depth
+                :max_span_depth, :dedup_values
 
     def self.compile(raw)
       return new if raw.nil?
@@ -30,6 +30,7 @@ module Vivarium
       @include_span_names = normalize_string_set(fetch_key(:include_span_names, :span_names))
       @span_pattern = normalize_pattern(fetch_key(:span, :span_pattern))
       @max_span_depth = normalize_integer(fetch_key(:max_span_depth, :max_depth))
+      @dedup_values = normalize_bool(fetch_key(:dedup_values, :dedup))
 
       payload_value = fetch_key(:payload)
       @payload_pattern = normalize_pattern(fetch_key(:payload_pattern))
@@ -46,7 +47,7 @@ module Vivarium
     end
 
     def needs_payload?
-      !@payload_pattern.nil? || !@payload_patterns_by_event.empty?
+      !@payload_pattern.nil? || !@payload_patterns_by_event.empty? || @dedup_values
     end
 
     def allow_span_name?(span_name)
@@ -137,6 +138,16 @@ module Vivarium
       n.positive? ? n : nil
     rescue ArgumentError, TypeError
       nil
+    end
+
+    def normalize_bool(value)
+      case value
+      when true then true
+      when false, nil then false
+      when String then %w[1 true yes on].include?(value.strip.downcase)
+      when Numeric then !value.zero?
+      else true
+      end
     end
 
     def normalize_pattern(value)
