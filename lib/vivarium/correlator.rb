@@ -14,13 +14,15 @@ module Vivarium
     SAVE_RAW_PROGRESS_INTERVAL = 1000
 
     def initialize(socket_path: Vivarium.socket_path, observer_pid:, main_tid:,
-                   filter: nil, dest: $stdout, save_raw: nil)
+                   filter: nil, dest: $stdout, save_raw: nil, otel_out: nil, otel_endpoint: nil)
       @socket_path = socket_path
       @observer_pid = observer_pid
       @main_tid = main_tid
       @filter = filter
       @dest = dest
       @save_raw = save_raw
+      @otel_out = otel_out
+      @otel_endpoint = otel_endpoint
 
       @client = DaemonClient.new(socket_path: socket_path)
       @events = []
@@ -35,6 +37,7 @@ module Vivarium
 
       @session_start_iso = Time.now.utc.iso8601(3)
       @session_start_ktime = Vivarium.monotonic_ktime_ns
+      start_stream_exporter if @otel_endpoint
       @sock = @client.open_event_stream
       @thread = Thread.new { run }
       @started = true
@@ -50,6 +53,14 @@ module Vivarium
       @thread&.join(2)
       @session_stop_iso = Time.now.utc.iso8601(3)
       @session_stop_ktime = Vivarium.monotonic_ktime_ns
+
+      if @stream
+        @stream.finalize(stop_ktime: @session_stop_ktime)
+        @stream_exporter.shutdown
+        warn "[vivarium] otel: streamed spans -> #{@otel_endpoint}"
+        @stopped = true
+        return
+      end
 
       events_snapshot = @events_mutex.synchronize { @events.dup }
       @stopped = true
@@ -68,6 +79,14 @@ module Vivarium
           Vivarium::RawStore.dump(io, events: events_snapshot, meta: meta)
         end
         warn "[vivarium] save_raw: saved #{events_snapshot.size} events -> #{@save_raw}"
+        return
+      end
+
+      if @otel_out
+        File.open(@otel_out, "w") do |io|
+          Vivarium::OtelExporter.dump(io, events: events_snapshot, meta: meta)
+        end
+        warn "[vivarium] otel_out: wrote OTLP spans -> #{@otel_out}"
         return
       end
 
@@ -113,8 +132,25 @@ module Vivarium
       buffer
     end
 
+    def start_stream_exporter
+      @stream_exporter = Vivarium::OtelHttpExporter.new(endpoint: @otel_endpoint).start
+      @stream = Vivarium::OtelSpanStreamer.new(
+        exporter: @stream_exporter,
+        session_start_iso: @session_start_iso,
+        session_start_ktime: @session_start_ktime
+      )
+    end
+
     def capture_event(bytes)
       ev = Vivarium::RawStore.unpack_record(bytes)
+
+      # Streaming mode converts events to spans live and does not buffer them,
+      # so a resident observation does not grow memory without bound.
+      if @stream
+        @stream.on_event(ev)
+        return
+      end
+
       count = @events_mutex.synchronize { @events << ev; @events.size }
       report_save_progress(count)
     rescue StandardError => e
