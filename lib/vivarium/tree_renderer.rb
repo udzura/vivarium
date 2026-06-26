@@ -24,6 +24,11 @@ module Vivarium
     UPROBE_EVENT_NAMES = %w[ssl_write].to_set.freeze
     DL_EVENT_NAMES = %w[dlopen mmap_exec].to_set.freeze
 
+    # Events whose traced value repeats heavily (same file/lib/env key opened over
+    # and over). With dedup_values on, each (event_name, value) pair is rendered
+    # only on its first occurrence in the session; later repeats are suppressed.
+    DEDUP_EVENT_NAMES = %w[path_open mmap_exec dlopen env_caccess].to_set.freeze
+
     SYNTHETIC_SPAN_NAME = "<no-span>"
     UNRESOLVED_METHOD_PREFIX = "<method_id="
 
@@ -67,6 +72,7 @@ module Vivarium
 
       @pid_comm = { observer_pid => "ruby" }
       @pid_parent = {}
+      @dedup_seen = Set.new
     end
 
     def render
@@ -366,6 +372,8 @@ module Vivarium
           next unless event_visible?(ev, span)
         end
 
+        next if dedup_suppressed?(ev, target_text)
+
         if ev.event_name == FORK_EVENT_NAME
           child_pid = read_proc_fork_child_pid(ev.payload)
           child_node = ProcNode.new(
@@ -503,6 +511,17 @@ module Vivarium
 
     def span_visible?(span)
       @display_filter.allow_span_name?(span_display_name(span))
+    end
+
+    # True when dedup_values is on and this (event_name, value) pair was already
+    # rendered earlier in the session. Only visible events reach this point, so a
+    # suppressed-by-filter event never consumes the "first occurrence" slot.
+    def dedup_suppressed?(ev, target_text)
+      return false unless @display_filter.dedup_values
+      return false unless DEDUP_EVENT_NAMES.include?(ev.event_name)
+
+      value = target_text || render_target(ev)
+      !@dedup_seen.add?([ev.event_name, value])
     end
 
     def event_visible?(ev, span, target_text = nil)

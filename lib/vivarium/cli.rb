@@ -26,6 +26,9 @@ module Vivarium
         opts.on("--max-span-depth N", Integer, "report: collapse method spans deeper than N (events kept)") do |v|
           options[:max_span_depth] = v
         end
+        opts.on("--dedup-values", "load/report: show repeated path_open/mmap_exec/dlopen/env_caccess values only once") do
+          options[:dedup_values] = true
+        end
       end
       parser.order!(argv)
 
@@ -45,8 +48,11 @@ module Vivarium
       abort "Usage: vivarium load <script>" unless script
       abort "File not found: #{script}" unless File.exist?(script)
 
+      filter = Vivarium::DEFAULT_FILTER
+      filter = filter.merge(dedup_values: true) if options[:dedup_values]
+
       Vivarium.observe(socket_path: options[:socket_path], dest: options[:dest],
-                       filter: Vivarium::DEFAULT_FILTER, save_raw: options[:save_raw]) do
+                       filter: filter, save_raw: options[:save_raw]) do
         Kernel.load(File.expand_path(script))
       end
     end
@@ -66,6 +72,9 @@ module Vivarium
       filter = resolve_report_filter(options)
       if options[:max_span_depth]
         filter = (filter || {}).merge(max_span_depth: options[:max_span_depth])
+      end
+      if options[:dedup_values]
+        filter = (filter || {}).merge(dedup_values: true)
       end
 
       Vivarium::TreeRenderer.new(
