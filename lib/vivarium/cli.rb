@@ -18,6 +18,10 @@ module Vivarium
         opts.on("--socket PATH", "vivariumd Unix domain socket path") { |v| options[:socket_path] = v }
         opts.on("-o", "--output PATH", "Log output file (default: stdout)") { |v| options[:dest] = File.open(v, "a") }
         opts.on("--save-raw PATH", "load: save raw events to PATH instead of rendering") { |v| options[:save_raw] = v }
+        opts.on("--otel-out PATH", "load: write OTLP/JSON spans to PATH instead of rendering") { |v| options[:otel_out] = v }
+        opts.on("--otel-endpoint URL", "load: stream OTLP/JSON spans to an OTLP/HTTP collector (or OTEL_EXPORTER_OTLP_ENDPOINT)") do |v|
+          options[:otel_endpoint] = v
+        end
         opts.on("-a", "--all", "report: show all events (ignore default filter)") { options[:show_all] = true }
         opts.on("--filter JSON", "report: filter as a JSON object (overrides --event/default)") { |v| options[:filter_json] = v }
         opts.on("-e", "--event NAMES", "report: comma-separated event names to include") do |v|
@@ -62,8 +66,16 @@ module Vivarium
       filter = Vivarium::DEFAULT_FILTER
       filter = filter.merge(dedup_values: true) if options[:dedup_values]
 
+      endpoint = options[:otel_endpoint] || ENV["OTEL_EXPORTER_OTLP_ENDPOINT"]
+      otel_out = options[:otel_out]
+      if endpoint && otel_out
+        warn "[vivarium] --otel-endpoint takes precedence; ignoring --otel-out"
+        otel_out = nil
+      end
+
       Vivarium.observe(socket_path: options[:socket_path], dest: options[:dest],
-                       filter: filter, save_raw: options[:save_raw]) do
+                       filter: filter, save_raw: options[:save_raw],
+                       otel_out: otel_out, otel_endpoint: endpoint) do
         Kernel.load(File.expand_path(script))
       end
     end
@@ -142,7 +154,7 @@ module Vivarium
         case e.event_name
         when "span_start"
           parent = stack.empty? ? thread_span : stack.last
-          span = synth_span_id(e.trace_hi.to_i, e.trace_lo.to_i, e.tid, e.ktime_ns)
+          span = Vivarium.synth_span_id(e.trace_hi.to_i, e.trace_lo.to_i, e.tid, e.ktime_ns)
           parent_of[span] = parent
           stack.push(span)
           [e, span, parent, stack.size]
@@ -162,25 +174,6 @@ module Vivarium
           end
         end
       end
-    end
-
-    U64_MASK = 0xFFFFFFFFFFFFFFFF
-
-    # Deterministic 64-bit span id for a method span, derived by folding the
-    # trace id, tid, and span-start ktime through splitmix64. Non-zero.
-    def self.synth_span_id(trace_hi, trace_lo, tid, start_ktime)
-      seed = mix64(trace_hi)
-      seed = mix64(seed ^ (trace_lo & U64_MASK))
-      seed = mix64(seed ^ (tid.to_i & U64_MASK))
-      seed = mix64(seed ^ (start_ktime.to_i & U64_MASK))
-      seed.zero? ? 1 : seed
-    end
-
-    def self.mix64(value)
-      x = (value.to_i + 0x9E3779B97F4A7C15) & U64_MASK
-      x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & U64_MASK
-      x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & U64_MASK
-      (x ^ (x >> 31)) & U64_MASK
     end
 
     # Resolve the report display filter by precedence:

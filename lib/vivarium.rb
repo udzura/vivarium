@@ -245,6 +245,36 @@ module Vivarium
     EVENT_SEVERITY_HIGH.include?(event_name.to_s) ? "high" : "medium"
   end
 
+  U64_MASK = 0xFFFFFFFFFFFFFFFF
+
+  # Deterministic 64-bit span id for a method-call span, derived by folding the
+  # trace id, tid, and span-start ktime through splitmix64. Non-zero, unique
+  # within a trace, and stable across re-runs. Shared by the report --dump-otel
+  # view and the OTLP exporter so both assign identical method span ids.
+  def self.synth_span_id(trace_hi, trace_lo, tid, start_ktime)
+    seed = mix64(trace_hi)
+    seed = mix64(seed ^ (trace_lo & U64_MASK))
+    seed = mix64(seed ^ (tid.to_i & U64_MASK))
+    seed = mix64(seed ^ (start_ktime.to_i & U64_MASK))
+    seed.zero? ? 1 : seed
+  end
+
+  def self.mix64(value)
+    x = (value.to_i + 0x9E3779B97F4A7C15) & U64_MASK
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & U64_MASK
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & U64_MASK
+    (x ^ (x >> 31)) & U64_MASK
+  end
+
+  # Deterministic 128-bit trace id (returned as [hi, lo], both non-zero) for a
+  # top-level method span in the streaming exporter, where each top span starts
+  # its own OTel trace. Folds the BPF trace id, tid, and span-start ktime.
+  def self.synth_trace_id(seed_hi, seed_lo, tid, start_ktime)
+    hi = synth_span_id(seed_hi, seed_lo, tid, start_ktime)
+    lo = synth_span_id(seed_lo ^ U64_MASK, seed_hi, tid, start_ktime)
+    [hi, lo]
+  end
+
   def self.decode_dns_qname(raw_payload)
     bytes = raw_payload.to_s.b.bytes
     labels = []
@@ -972,7 +1002,15 @@ module Vivarium
 
       TRACEPOINT_PROBE(sched, sched_process_exit)
       {
-        u32 tid = (u32)bpf_get_current_pid_tgid();
+        u64 pid_tgid = bpf_get_current_pid_tgid();
+        u32 pid = pid_tgid >> 32;
+        u32 tid = (u32)pid_tgid;
+        if (target_enabled(pid, tid)) {
+          struct event_t ev = {};
+          ev.pid = pid;
+          __builtin_memcpy(ev.event_name, "proc_exit", 10);
+          submit_event(&ev);
+        }
         config_spawned_targets.delete(&tid);
         dns_connected_tids.delete(&tid);
         otel_ctx.delete(&tid);
@@ -2247,15 +2285,19 @@ module Vivarium
     end
   end
 
-  def self.observe(socket_path: self.socket_path, dest: $stdout, filter: nil, save_raw: nil, &block)
+  def self.observe(socket_path: self.socket_path, dest: $stdout, filter: nil, save_raw: nil,
+                   otel_out: nil, otel_endpoint: nil, &block)
     if block_given?
-      return scoped_observe(socket_path: socket_path, dest: dest, filter: filter, save_raw: save_raw, &block)
+      return scoped_observe(socket_path: socket_path, dest: dest, filter: filter,
+                            save_raw: save_raw, otel_out: otel_out, otel_endpoint: otel_endpoint, &block)
     end
 
-    top_observe(socket_path: socket_path, dest: dest, filter: filter, save_raw: save_raw)
+    top_observe(socket_path: socket_path, dest: dest, filter: filter,
+                save_raw: save_raw, otel_out: otel_out, otel_endpoint: otel_endpoint)
   end
 
-  def self.top_observe(socket_path: self.socket_path, dest: $stdout, filter: nil, save_raw: nil)
+  def self.top_observe(socket_path: self.socket_path, dest: $stdout, filter: nil, save_raw: nil,
+                       otel_out: nil, otel_endpoint: nil)
     client = DaemonClient.new(socket_path: socket_path)
     pid = Process.pid
     main_tid = gettid
@@ -2266,7 +2308,9 @@ module Vivarium
       main_tid: main_tid,
       filter: filter,
       dest: dest,
-      save_raw: save_raw
+      save_raw: save_raw,
+      otel_out: otel_out,
+      otel_endpoint: otel_endpoint
     )
     correlator.start
     client.register(pid)
@@ -2281,7 +2325,8 @@ module Vivarium
     session
   end
 
-  def self.scoped_observe(socket_path: self.socket_path, dest:, filter: nil, save_raw: nil)
+  def self.scoped_observe(socket_path: self.socket_path, dest:, filter: nil, save_raw: nil,
+                          otel_out: nil, otel_endpoint: nil)
     client = DaemonClient.new(socket_path: socket_path)
     pid = Process.pid
     main_tid = gettid
@@ -2292,7 +2337,9 @@ module Vivarium
       main_tid: main_tid,
       filter: filter,
       dest: dest,
-      save_raw: save_raw
+      save_raw: save_raw,
+      otel_out: otel_out,
+      otel_endpoint: otel_endpoint
     )
     correlator.start
     client.register(pid)
@@ -2427,6 +2474,8 @@ end
 require_relative "vivarium/daemon_client"
 require_relative "vivarium/api_server"
 require_relative "vivarium/raw_store"
+require_relative "vivarium/otel_exporter"
+require_relative "vivarium/otel_stream"
 require_relative "vivarium/correlator"
 require_relative "vivarium/display_filter"
 require_relative "vivarium/tree_renderer"
