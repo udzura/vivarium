@@ -107,9 +107,9 @@ module Vivarium
       ).render
     end
 
-    # [debug] Flat per-event dump of the OTel-oriented fields, sorted by ktime,
-    # with method-call span nesting reconstructed in userspace (strategy B).
-    # Temporary aid for verifying trace_id/span_id propagation; not the tree view.
+    # Flat per-event dump of the OTel-oriented fields, sorted by ktime, with
+    # method-call span nesting resolved by compute_otel_rows. An alternative to
+    # the tree view for inspecting trace_id/span_id propagation.
     def self.dump_otel(events, dest)
       header = format("%-18s %-7s %-7s %-6s %-6s %-16s %-32s %-16s %-16s %-5s %s",
                       "ktime_ns", "pid", "tid", "uid", "gid", "comm",
@@ -123,14 +123,13 @@ module Vivarium
       end
     end
 
-    # [debug] Reconstruct method-call span nesting (strategy B) from span_start/
-    # span_stop, layered on top of the BPF-provided thread/process span. Returns
-    # [event, span_id, parent_span_id, depth] per event. Method spans receive a
-    # 64-bit id hashed from (trace_id, tid, span-start ktime) to match what an
-    # OTel exporter would emit (non-zero, unique within the trace, stable across
-    # re-runs); when no method span is active the BPF thread span (and its
-    # parent_span_id) is the base frame. The stack is per-tid so spawned children
-    # nest independently.
+    # Resolve each event's effective OTel span by replaying span_start/span_stop
+    # into a per-tid stack of method-call spans on top of the BPF-provided
+    # thread/process span. Returns [event, span_id, parent_span_id, depth] per
+    # event. A method span's id is hashed from (trace_id, tid, span-start ktime):
+    # non-zero, unique within the trace, and stable across re-runs. When no method
+    # span is active, the thread span and its parent_span_id form the base frame.
+    # The stack is per-tid so spawned children nest independently.
     def self.compute_otel_rows(events)
       sorted = events.sort_by { |e| [e.ktime_ns, e.pid, e.tid] }
       stacks = Hash.new { |h, k| h[k] = [] } # tid => [method_span_id, ...]
